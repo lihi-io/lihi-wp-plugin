@@ -3,8 +3,10 @@
 msgid ""
 msgstr ""
 "Project-Id-Version: lihi WP Plugin 1.0.5\n"
-"POT-Creation-Date: 2026-04-09\n"
-"PO-Revision-Date: 2026-06-25\n"
+"POT-Creation-Date: 2026-07-30\n"
+"PO-Revision-Date: 2026-07-30\n"
+"Last-Translator: lihi\n"
+"Language-Team: Traditional Chinese\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
@@ -18,8 +20,37 @@ msgid "Short URL"
 msgstr "短網址"
 
 #: includes/service/lihi-service.php
-msgid "No token returned from lihi API."
-msgstr "lihi API 未回傳 token。"
+msgid "Invalid authorization code returned from lihi API."
+msgstr "lihi API 回傳的授權碼無效。"
+
+#: includes/service/lihi-service.php
+msgid "Invalid credentials returned from lihi API."
+msgstr "lihi API 回傳的登入憑證無效。"
+
+#: includes/service/lihi-service.php
+msgid "Please log in to lihi before using this feature."
+msgstr "請先登入 lihi 再使用此功能。"
+
+#: includes/service/lihi-service.php
+msgid "lihi authentication is busy. Please try again."
+msgstr "lihi 驗證處理中，請再試一次。"
+
+#: includes/settings.php
+#: includes/shorturl-column-ajax.php
+msgid "Another lihi authentication request is in progress. Please wait and try again."
+msgstr "另一個 lihi 登入或憑證更新正在進行中，請稍候再試。"
+
+#: includes/service/lihi-service.php
+msgid "Your lihi login session has expired."
+msgstr "lihi 登入憑證已過期。"
+
+#: includes/service/lihi-service.php
+msgid "Could not refresh the lihi login session. Please sign in again."
+msgstr "無法更新 lihi 登入憑證，請重新登入。"
+
+#: includes/service/lihi-service.php
+msgid "The lihi account connection changed. Please try the request again."
+msgstr "lihi 帳號連結已變更，請重新執行此操作。"
 
 #: includes/service/lihi-service.php
 msgid "No short_url returned from lihi API."
@@ -198,22 +229,25 @@ msgid "You do not have permission to generate a short URL for this item."
 msgstr "您沒有權限為此項目產生短網址。"
 
 #: includes/shorturl-column-ajax.php
-msgid "Your lihi email has not been verified yet. Please open Settings → lihi Short URL to verify again."
-msgstr "您的 lihi Email 尚未完成驗證，請至「設定 → lihi 短網址」重新驗證。"
+msgid "lihi rejected this account session. Please open Settings → lihi Short URL and sign in again."
+msgstr "lihi 拒絕此帳號的登入憑證，請至「設定 → lihi 短網址」重新登入。"
 
 #: includes/settings.php
 #: includes/shorturl-column-ajax.php
 msgid "Your lihi account is unavailable. Please contact lihi support before creating short URLs."
 msgstr "您的 lihi 帳號目前不可使用，請聯絡 lihi 客服後再建立短網址。"
 
-#: includes/settings.php
 #: includes/shorturl-column-ajax.php
-msgid "Your lihi login session has expired. Please try again."
-msgstr "lihi 登入狀態已過期，請再試一次。"
+msgid "Your lihi login session could not be refreshed. Please sign in again under Settings → lihi Short URL."
+msgstr "無法更新 lihi 登入憑證，請至「設定 → lihi 短網址」重新登入。"
 
 #: includes/shorturl-column-ajax.php
-msgid "lihi email is not configured. Please set it in Settings → lihi Short URL."
-msgstr "lihi 尚未設定 Email，請至「設定 → lihi 短網址」填寫。"
+msgid "lihi is not connected. Please log in under Settings → lihi Short URL."
+msgstr "尚未連結 lihi，請至「設定 → lihi 短網址」登入。"
+
+#: includes/shorturl-column-ajax.php
+msgid "Invalid lihi dashboard target."
+msgstr "無效的 lihi 後台目標位置。"
 
 #: includes/shorturl-column-ajax.php
 #. translators: %s: validation error message returned by the lihi API.
@@ -248,26 +282,14 @@ msgstr "Email"
 msgid "lihi Short URL"
 msgstr "lihi 短網址"
 
-#: includes/settings.php
-msgid "Email used to authenticate with the lihi service. Saving sends a verification email; the plugin can be used after verification is complete."
-msgstr "用於 lihi 服務驗證身分的 Email；儲存後會寄送驗證信，驗證完成後方可使用套件。"
-
-#: includes/settings.php
-msgid "Your browser blocked the lihi dashboard tab. Please allow pop-ups and try again."
-msgstr "您的瀏覽器封鎖了 lihi 後台分頁，請允許彈出式視窗後再試一次。"
-
 #: includes/add-shorturl-column.php
 #: includes/settings.php
 msgid "Your browser does not support secure lihi dashboard login."
 msgstr "您的瀏覽器不支援安全的 lihi 後台登入。"
 
 #: includes/settings.php
-msgid "Please confirm that lihi may use this email and password to create an account if one does not already exist."
-msgstr "請確認您同意 lihi 在帳號不存在時使用此 Email 與密碼建立帳號。"
-
-#: includes/settings.php
-msgid "lihi Services"
-msgstr "lihi 服務"
+msgid "Please confirm that lihi may use this email and password to create an account."
+msgstr "請確認您同意 lihi 使用此 Email 與密碼建立帳號。"
 
 #: includes/settings.php
 msgid "lihi dashboard"
@@ -338,40 +360,48 @@ msgid "Go to lihi dashboard"
 msgstr "前往 lihi 後台"
 
 #: includes/settings.php
-msgid "Save and verify an email before opening the dashboard."
-msgstr "請先儲存並驗證 Email，再開啟後台。"
-
-#: includes/settings.php
 msgid "Connected lihi account"
 msgstr "已連結的 lihi 帳號"
 
 #: includes/settings.php
-msgid "Save and verify the email used by this WordPress site."
-msgstr "儲存並驗證此 WordPress 網站使用的 Email。"
+msgid "Connect a lihi account"
+msgstr "連結 lihi 帳號"
 
 #: includes/settings.php
 msgid "This WordPress site is connected to this lihi account."
 msgstr "此 WordPress 網站已連結到這個 lihi 帳號。"
 
 #: includes/settings.php
-msgid "Saving sends a verification email. The WordPress shortcut works after verification is complete."
-msgstr "儲存後會寄送驗證信；驗證完成後即可使用便利的短網址功能。"
+msgid "Sign in to an existing account or register a new one."
+msgstr "登入既有帳號，或註冊新帳號。"
 
 #: includes/settings.php
-msgid "Use the lihi account password to verify this WordPress site."
-msgstr "使用 lihi 帳號密碼驗證此 WordPress 網站。"
+msgid "Log in"
+msgstr "登入"
 
 #: includes/settings.php
 msgid "Password"
 msgstr "密碼"
 
 #: includes/settings.php
-msgid "If the account does not exist, I agree that lihi may use this email and password to create an account."
-msgstr "如果帳號不存在，同意 lihi 使用此 Email 與密碼建立帳號。"
+msgid "Use your existing lihi account to connect this site."
+msgstr "使用既有的 lihi 帳號連結此網站。"
 
 #: includes/settings.php
-msgid "No lihi account is connected yet."
-msgstr "尚未連結 lihi 帳號。"
+msgid "Register"
+msgstr "註冊"
+
+#: includes/settings.php
+msgid "Create a lihi account, then verify it from your email before logging in."
+msgstr "建立 lihi 帳號後，請先透過 Email 完成驗證，再回來登入。"
+
+#: includes/settings.php
+msgid "I agree that lihi may use this email and password to create an account."
+msgstr "我同意 lihi 使用此 Email 與密碼建立帳號。"
+
+#: includes/settings.php
+msgid "Please enter a password with at least 6 characters."
+msgstr "請輸入至少 6 個字元的密碼。"
 
 #: includes/settings.php
 msgid "Too many requests. Please wait a moment and try again."
@@ -380,10 +410,6 @@ msgstr "請求過於頻繁，請稍候再試。"
 #: includes/settings.php
 msgid "You do not have permission to open the lihi dashboard."
 msgstr "您沒有權限開啟 lihi 後台。"
-
-#: includes/settings.php
-msgid "lihi email cleared. Short URL generation is disabled until a new email is verified."
-msgstr "已清除 lihi Email；在新 Email 完成驗證前，短網址功能將停用。"
 
 #: includes/settings.php
 msgid "Please enter the lihi account password."
@@ -406,48 +432,100 @@ msgid "lihi Short URL Settings"
 msgstr "lihi 短網址設定"
 
 #: includes/settings.php
-msgid "Save & Verify"
-msgstr "儲存並驗證"
-
-#: includes/settings.php
 msgid "Log out"
 msgstr "登出"
 
 #: includes/settings.php
-msgid "You do not have permission to update this setting."
-msgstr "您沒有權限更新此設定。"
+msgid "You do not have permission to connect this account."
+msgstr "您沒有權限連結此帳號。"
+
+#: includes/settings.php
+msgid "You do not have permission to register this account."
+msgstr "您沒有權限註冊此帳號。"
+
+#: includes/settings.php
+msgid "You do not have permission to disconnect this account."
+msgstr "您沒有權限解除此帳號的連結。"
 
 #: includes/settings.php
 msgid "Please enter a valid email address."
 msgstr "請輸入有效的 Email 地址。"
 
 #: includes/settings.php
-msgid "lihi rejected the email address. Please check the format and try again."
-msgstr "lihi 拒絕了此 Email 地址，請確認格式後再試一次。"
-
-#: includes/settings.php
 msgid "Email or password invalid. Please check and try again."
 msgstr "Email 或密碼錯誤，請確認後再試一次。"
 
 #: includes/settings.php
-msgid "Not verified yet. Enter the password, confirm the agreement, then click Save & Verify to bind the email."
-msgstr "尚未完成驗證，請填寫密碼並勾選同意後，點擊「儲存並驗證」綁定 Email。"
+msgid "This lihi account does not exist. Register it first, then verify your email."
+msgstr "此 lihi 帳號不存在，請先註冊並完成 Email 驗證。"
+
+#: includes/settings.php
+msgid "Could not complete the secure login exchange. Please try again."
+msgstr "無法完成安全登入驗證，請再試一次。"
+
+#: includes/settings.php
+msgid "lihi rejected the login details. Please check them and try again."
+msgstr "lihi 拒絕登入資料，請確認後再試一次。"
+
+#: includes/settings.php
+msgid "Too many login attempts. Please wait a moment and try again."
+msgstr "登入嘗試過於頻繁，請稍候再試。"
+
+#: includes/settings.php
+msgid "lihi rejected this login. Please check the account and try again."
+msgstr "lihi 拒絕此次登入，請確認帳號後再試一次。"
+
+#: includes/settings.php
+msgid "✓ Logged in to lihi."
+msgstr "✓ 已登入 lihi。"
+
+#: includes/settings.php
+msgid "This lihi account already exists. Use the login form instead."
+msgstr "此 lihi 帳號已存在，請改用登入表單。"
+
+#: includes/settings.php
+msgid "Your lihi account is unavailable. Please contact lihi support."
+msgstr "您的 lihi 帳號目前不可使用，請聯絡 lihi 客服。"
+
+#: includes/settings.php
+msgid "lihi rejected the registration details. Check the email and password, then try again."
+msgstr "lihi 拒絕註冊資料，請確認 Email 與密碼後再試一次。"
+
+#: includes/settings.php
+msgid "Too many registration attempts. Please wait a moment and try again."
+msgstr "註冊嘗試過於頻繁，請稍候再試。"
+
+#: includes/settings.php
+msgid "lihi rejected this registration. Please check the account and try again."
+msgstr "lihi 拒絕此次註冊，請確認帳號後再試一次。"
+
+#: includes/settings.php
+msgid "Verification email sent. Open it to verify the account, then return here and log in."
+msgstr "驗證信已寄出。請開啟信件完成帳號驗證，再回到此頁登入。"
+
+#: includes/settings.php
+msgid "Could not clear the local lihi session. Please try again."
+msgstr "無法清除 WordPress 本機的 lihi 登入憑證，請再試一次。"
+
+#: includes/settings.php
+msgid "Logged out. Local lihi credentials were removed from WordPress."
+msgstr "已登出，並已從 WordPress 移除本機儲存的 lihi 登入憑證。"
+
+#: includes/settings.php
+msgid "Your lihi login session has expired. Please sign in again."
+msgstr "lihi 登入憑證已過期，請重新登入。"
+
+#: includes/settings.php
+msgid "lihi rejected this account session. Please log out and sign in again."
+msgstr "lihi 拒絕此帳號的登入憑證，請登出後重新登入。"
+
+#: includes/settings.php
+msgid "lihi rejected this account session. Please sign in again."
+msgstr "lihi 拒絕此帳號的登入憑證，請重新登入。"
 
 #: includes/settings.php
 msgid "The lihi service is unavailable. Please try again later."
 msgstr "lihi 服務目前無法連線，請稍後再試。"
-
-#: includes/settings.php
-msgid "Too many verification attempts. Please wait a moment and try again."
-msgstr "驗證嘗試過於頻繁，請稍候再試。"
-
-#: includes/settings.php
-msgid "✓ Email verified."
-msgstr "✓ Email 已驗證。"
-
-#: includes/settings.php
-msgid "Verification email sent. Please click the link in that email to finish verification."
-msgstr "驗證信已寄出，請點擊信中的連結完成驗證。"
 
 #: includes/settings.php
 msgid "The lihi service is temporarily unavailable. Please try again later."
@@ -456,10 +534,6 @@ msgstr "lihi 服務目前無法連線，請稍後再試。"
 #: includes/settings.php
 msgid "Could not load account information."
 msgstr "無法載入帳號資訊。"
-
-#: includes/settings.php
-msgid "Account"
-msgstr "帳號"
 
 #: includes/settings.php
 msgid "Subscribe Plan"
@@ -472,6 +546,10 @@ msgstr "方案到期日"
 #: includes/settings.php
 msgid "(none)"
 msgstr "（無）"
+
+#: includes/settings.php
+msgid "Unavailable"
+msgstr "無法取得"
 
 #: includes/settings.php
 msgid "—"

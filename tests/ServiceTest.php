@@ -4,32 +4,45 @@ namespace Lihi\ShortUrl\Tests;
 
 use Brain\Monkey;
 use Brain\Monkey\Functions;
+use Lihi\ShortUrl\Lihi_Authentication_Busy_Exception;
 use Lihi\ShortUrl\Lihi_Client_Interface;
+use Lihi\ShortUrl\Lihi_Not_Found_Exception;
+use Lihi\ShortUrl\Lihi_Rate_Limit_Exception;
+use Lihi\ShortUrl\Lihi_Refresh_Token_Invalid_Exception;
+use Lihi\ShortUrl\Lihi_Server_Exception;
 use Lihi\ShortUrl\Lihi_Service;
-use Lihi\ShortUrl\Lihi_Singletons;
+use Lihi\ShortUrl\Lihi_Token_Store;
+use Lihi\ShortUrl\Lihi_Token_Invalid_Exception;
+use Lihi\ShortUrl\Lihi_User_Invalid_Exception;
 use Mockery;
 use PHPUnit\Framework\TestCase;
 
 class ServiceTest extends TestCase
 {
+    private const UUID = '11111111-1111-4111-8111-111111111111';
+
     protected function setUp(): void
     {
         parent::setUp();
         Monkey\setUp();
-        // fetch_or_create() always resolves the WP host for the namespaced
-        // API type; default both so tests don't have to repeat themselves.
-        Functions\when('home_url')->justReturn('https://example.com');
-        Functions\when('wp_parse_url')->justReturn('example.com');
-        // Default get_option to the caller's default value. Individual tests
-        // override with Functions\when('get_option')->... when they need a
-        // specific value.
-        Functions\when('get_option')->alias(fn($key, $default = false) => $default);
-        Functions\when('add_query_arg')->alias(function (array $params, string $url): string {
-            $separator = strpos($url, '?') === false ? '?' : '&';
-            return $url . $separator . http_build_query($params);
-        });
+
         Functions\when('esc_html__')->returnArg(1);
-        Functions\when('Lihi\ShortUrl\lihi_email')->justReturn('user@example.com');
+        Functions\when('usleep')->justReturn(null);
+        Functions\when('Lihi\ShortUrl\lihi_site_host')
+            ->justReturn('example.com');
+        Functions\when('Lihi\ShortUrl\lihi_resolve_url')
+            ->alias(function ($itemId, $type) {
+                if ($type === 'attachment') {
+                    return 'https://example.com/uploads/' . $itemId . '.jpg';
+                }
+
+                return 'https://example.com/?p=' . $itemId;
+            });
+        Functions\when('add_query_arg')
+            ->alias(function (array $params, string $url): string {
+                $separator = strpos($url, '?') === false ? '?' : '&';
+                return $url . $separator . http_build_query($params);
+            });
     }
 
     protected function tearDown(): void
@@ -39,922 +52,1152 @@ class ServiceTest extends TestCase
         parent::tearDown();
     }
 
-    // -------------------------------------------------------------------------
-    // Helpers
-    // -------------------------------------------------------------------------
-
     /**
      * @return \Mockery\MockInterface&Lihi_Client_Interface
      */
-    private function makeClient(): Lihi_Client_Interface
+    private function client(): Lihi_Client_Interface
     {
         return Mockery::mock(Lihi_Client_Interface::class);
     }
 
-    private function makeService( Lihi_Client_Interface $client ): Lihi_Service {
-        return new Lihi_Service($client, Lihi_Singletons::lihi_token_store());
-    }
-
-    /** Build a structurally-valid JWT with the given exp timestamp. */
-    private function makeJwt(int $exp): string
+    /**
+     * @return \Mockery\MockInterface&Lihi_Token_Store
+     */
+    private function store(): Lihi_Token_Store
     {
-        $b64 = fn($v) => rtrim(strtr(base64_encode(json_encode($v)), '+/', '-_'), '=');
-        return $b64(['alg' => 'HS256', 'typ' => 'JWT'])
-            . '.' . $b64(['sub' => 'test', 'exp' => $exp])
-            . '.sig';
+        $store = Mockery::mock(Lihi_Token_Store::class);
+        $store->shouldReceive('ensure_enabled')->byDefault();
+        $store->shouldReceive('renew_lock')->byDefault()->andReturn(true);
+        $store->shouldReceive('get_fresh')
+            ->byDefault()
+            ->andReturnUsing(function () use ($store) {
+                return $store->get();
+            });
+
+        return $store;
     }
 
-    private function makeFindResponse(string $site): array
+    private function service(
+        Lihi_Client_Interface $client,
+        Lihi_Token_Store $store
+    ): Lihi_Service {
+        return new Lihi_Service($client, $store);
+    }
+
+    /**
+     * @return array{
+     *   uuid: string,
+     *   access_token: string,
+     *   refresh_token: string,
+     * }
+     */
+    private function credentials(
+        string $access = 'old-access',
+        string $refresh = 'old-refresh',
+        string $uuid = self::UUID,
+        string $email = 'user@example.com'
+    ): array {
+        return [
+            'email'         => $email,
+            'uuid'          => $uuid,
+            'access_token'  => $access,
+            'refresh_token' => $refresh,
+        ];
+    }
+
+    private function findResponse(string $site): array
     {
         return [
             'result' => true,
-            'data'   => [
-                'site' => $site,
+            'data'   => ['site' => $site],
+        ];
+    }
+
+    /** @test */
+    public function login_performs_pkce_exchange_and_atomically_stores_credentials(): void
+    {
+        $client    = $this->client();
+        $store     = $this->store();
+        $challenge = '';
+        $verifier  = '';
+        $events    = [];
+
+        $client->shouldReceive('login')
+            ->once()
+            ->with(
+                'user@example.com',
+                'password',
+                Mockery::type('string')
+            )
+            ->andReturnUsing(
+                function ($email, $password, $value) use (&$challenge, &$events) {
+                    $events[] = 'login';
+                    $challenge = $value;
+                    return ['code' => str_repeat('c', 43)];
+                }
+            );
+        $client->shouldReceive('exchange_authorization_code')
+            ->once()
+            ->with(str_repeat('c', 43), Mockery::type('string'))
+            ->andReturnUsing(function ($code, $value) use (&$verifier, &$events) {
+                $events[] = 'exchange';
+                $verifier = $value;
+                return [
+                    'uuid'          => '01ARZ3NDEKTSV4RRFFQ69G5FAV',
+                    'token'         => 'access-token',
+                    'refresh_token' => 'refresh-token',
+                ];
+            });
+
+        $store->shouldReceive('acquire_lock')
+            ->once()
+            ->andReturnUsing(function () use (&$events) {
+                $events[] = 'acquire';
+                return true;
+            });
+        $store->shouldReceive('renew_lock')
+            ->twice()
+            ->andReturnUsing(function () use (&$events) {
+                $events[] = 'renew';
+                return true;
+            });
+        $store->shouldReceive('set')
+            ->once()
+            ->with(
+                'user@example.com',
+                '01ARZ3NDEKTSV4RRFFQ69G5FAV',
+                'access-token',
+                'refresh-token'
+            )
+            ->andReturnUsing(function () use (&$events) {
+                $events[] = 'set';
+            });
+        $store->shouldReceive('release_lock')
+            ->once()
+            ->andReturnUsing(function () use (&$events) {
+                $events[] = 'release';
+            });
+
+        $result = $this->service($client, $store)
+            ->login('user@example.com', 'password');
+
+        $expectedChallenge = rtrim(
+            strtr(
+                base64_encode(hash('sha256', $verifier, true)),
+                '+/',
+                '-_'
+            ),
+            '='
+        );
+        $this->assertMatchesRegularExpression(
+            '/^[A-Za-z0-9_-]{43}$/',
+            $verifier
+        );
+        $this->assertSame($expectedChallenge, $challenge);
+        $this->assertSame([
+            'email'         => 'user@example.com',
+            'uuid'          => '01ARZ3NDEKTSV4RRFFQ69G5FAV',
+            'access_token'  => 'access-token',
+            'refresh_token' => 'refresh-token',
+        ], $result);
+        $this->assertSame(
+            ['acquire', 'login', 'renew', 'exchange', 'renew', 'set', 'release'],
+            $events
+        );
+    }
+
+    /** @test */
+    public function login_stops_when_the_auth_lease_cannot_be_renewed(): void
+    {
+        $client = $this->client();
+        $store  = $this->store();
+
+        $client->shouldReceive('login')
+            ->once()
+            ->andReturn(['code' => str_repeat('c', 43)]);
+        $client->shouldNotReceive('exchange_authorization_code');
+        $store->shouldReceive('acquire_lock')->once()->andReturn(true);
+        $store->shouldReceive('renew_lock')->once()->andReturn(false);
+        $store->shouldReceive('release_lock')->once();
+        $store->shouldNotReceive('set');
+
+        $this->expectException(Lihi_Authentication_Busy_Exception::class);
+        $this->service($client, $store)
+            ->login('user@example.com', 'password');
+    }
+
+    /** @test */
+    public function login_reports_lock_contention_as_authentication_busy(): void
+    {
+        $client = $this->client();
+        $store  = $this->store();
+
+        $store->shouldReceive('acquire_lock')->andReturn(false);
+        $store->shouldNotReceive('set');
+        $client->shouldNotReceive('login');
+        $client->shouldNotReceive('exchange_authorization_code');
+
+        $this->expectException(Lihi_Authentication_Busy_Exception::class);
+        $this->service($client, $store)
+            ->login('user@example.com', 'password');
+    }
+
+    /** @test */
+    public function login_never_starts_when_the_plugin_is_deactivated(): void
+    {
+        $client  = $this->client();
+        $store   = $this->store();
+        $failure = new Lihi_Server_Exception('authentication disabled');
+
+        $store->shouldReceive('ensure_enabled')
+            ->once()
+            ->andThrow($failure);
+        $store->shouldNotReceive('acquire_lock');
+        $store->shouldNotReceive('set');
+        $client->shouldNotReceive('login');
+        $client->shouldNotReceive('exchange_authorization_code');
+
+        try {
+            $this->service($client, $store)
+                ->login('user@example.com', 'password');
+            $this->fail('Expected deactivated authentication to fail.');
+        } catch (Lihi_Server_Exception $error) {
+            $this->assertSame($failure, $error);
+        }
+    }
+
+    /** @test */
+    public function login_never_stores_when_authorization_code_is_missing(): void
+    {
+        $client = $this->client();
+        $store  = $this->store();
+
+        $client->shouldReceive('login')
+            ->once()
+            ->andReturn([]);
+        $client->shouldNotReceive('exchange_authorization_code');
+        $store->shouldReceive('acquire_lock')->once()->andReturn(true);
+        $store->shouldReceive('release_lock')->once();
+        $store->shouldNotReceive('set');
+
+        $this->expectException(Lihi_Server_Exception::class);
+        $this->service($client, $store)
+            ->login('user@example.com', 'password');
+    }
+
+    /** @test */
+    public function login_rejects_a_malformed_authorization_code(): void
+    {
+        $client = $this->client();
+        $store  = $this->store();
+
+        $client->shouldReceive('login')
+            ->once()
+            ->andReturn(['code' => 'not-base64url-code']);
+        $client->shouldNotReceive('exchange_authorization_code');
+        $store->shouldReceive('acquire_lock')->once()->andReturn(true);
+        $store->shouldReceive('release_lock')->once();
+        $store->shouldNotReceive('set');
+
+        $this->expectException(Lihi_Server_Exception::class);
+        $this->expectExceptionMessage('Invalid authorization code');
+        $this->service($client, $store)
+            ->login('user@example.com', 'password');
+    }
+
+    /** @test */
+    public function login_rejects_incomplete_token_exchange_without_overwriting_store(): void
+    {
+        $client = $this->client();
+        $store  = $this->store();
+
+        $client->shouldReceive('login')
+            ->once()
+            ->andReturn(['code' => str_repeat('c', 43)]);
+        $client->shouldReceive('exchange_authorization_code')
+            ->once()
+            ->andReturn([
+                'uuid'  => self::UUID,
+                'token' => 'access-only',
+            ]);
+        $store->shouldReceive('acquire_lock')->once()->andReturn(true);
+        $store->shouldReceive('release_lock')->once();
+        $store->shouldNotReceive('set');
+
+        $this->expectException(Lihi_Server_Exception::class);
+        $this->service($client, $store)
+            ->login('user@example.com', 'password');
+    }
+
+    /** @test */
+    public function login_releases_store_lock_when_persistence_fails(): void
+    {
+        $client = $this->client();
+        $store  = $this->store();
+
+        $client->shouldReceive('login')
+            ->once()
+            ->andReturn(['code' => str_repeat('c', 43)]);
+        $client->shouldReceive('exchange_authorization_code')
+            ->once()
+            ->andReturn([
+                'uuid'          => self::UUID,
+                'token'         => 'access',
+                'refresh_token' => 'refresh',
+            ]);
+        $store->shouldReceive('acquire_lock')->once()->andReturn(true);
+        $store->shouldReceive('set')
+            ->once()
+            ->andThrow(new Lihi_Server_Exception('database unavailable'));
+        $store->shouldReceive('release_lock')->once();
+
+        $this->expectException(Lihi_Server_Exception::class);
+        $this->service($client, $store)
+            ->login('user@example.com', 'password');
+    }
+
+    /** @test */
+    public function login_releases_store_lock_when_the_auth_request_fails(): void
+    {
+        $client  = $this->client();
+        $store   = $this->store();
+        $failure = new Lihi_Server_Exception('network unavailable');
+
+        $store->shouldReceive('acquire_lock')->once()->andReturn(true);
+        $store->shouldReceive('release_lock')->once();
+        $store->shouldNotReceive('set');
+        $client->shouldReceive('login')
+            ->once()
+            ->andThrow($failure);
+        $client->shouldNotReceive('exchange_authorization_code');
+
+        try {
+            $this->service($client, $store)
+                ->login('user@example.com', 'password');
+            $this->fail('Expected the Login request to fail.');
+        } catch (Lihi_Server_Exception $error) {
+            $this->assertSame($failure, $error);
+        }
+    }
+
+    /** @test */
+    public function register_never_creates_a_local_session(): void
+    {
+        $client = $this->client();
+        $store  = $this->store();
+
+        $client->shouldReceive('register')
+            ->once()
+            ->with('new@example.com', 'new-password');
+        $store->shouldNotReceive('set');
+        $store->shouldNotReceive('acquire_lock');
+
+        $this->service($client, $store)
+            ->register('new@example.com', 'new-password');
+
+        $this->assertTrue(true);
+    }
+
+    /** @test */
+    public function logout_flushes_the_complete_credential_tuple(): void
+    {
+        $client = $this->client();
+        $store  = $this->store();
+        $store->shouldReceive('flush')->once();
+
+        $this->service($client, $store)->logout();
+        $this->assertTrue(true);
+    }
+
+    /** @test */
+    public function protected_call_requires_complete_credentials(): void
+    {
+        $client = $this->client();
+        $store  = $this->store();
+
+        $store->shouldReceive('get')->once()->andReturn(false);
+        $client->shouldNotReceive('get_profile');
+
+        $this->expectException(Lihi_Token_Invalid_Exception::class);
+        $this->service($client, $store)->get_profile();
+    }
+
+    /** @test */
+    public function profile_uses_persisted_access_and_returns_profile_data(): void
+    {
+        $client = $this->client();
+        $store  = $this->store();
+        $tokens = $this->credentials();
+
+        $store->shouldReceive('get')->once()->andReturn($tokens);
+        $client->shouldReceive('get_profile')
+            ->once()
+            ->with('old-access', Mockery::type('callable'))
+            ->andReturn([
+                'result' => true,
+                'data'   => [
+                    'user_role' => 'admin',
+                    'end_date'  => '2026-12-31',
+                ],
+            ]);
+
+        $profile = $this->service($client, $store)->get_profile();
+
+        $this->assertSame('admin', $profile['user_role']);
+        $this->assertSame('2026-12-31', $profile['end_date']);
+    }
+
+    /** @test */
+    public function token_fallback_rotates_and_persists_both_tokens(): void
+    {
+        $client = $this->client();
+        $store  = $this->store();
+        $old    = $this->credentials();
+
+        $store->shouldReceive('get')
+            ->times(3)
+            ->andReturn($old, $old, $old);
+        $store->shouldReceive('acquire_lock')->once()->andReturn(true);
+        $store->shouldReceive('set')
+            ->once()
+            ->with(
+                'user@example.com',
+                self::UUID,
+                'new-access',
+                'new-refresh'
+            );
+        $store->shouldReceive('release_lock')->once();
+
+        $client->shouldReceive('refresh_access_token')
+            ->once()
+            ->with(self::UUID, 'old-refresh')
+            ->andReturn([
+                'uuid'          => self::UUID,
+                'token'         => 'new-access',
+                'refresh_token' => 'new-refresh',
+            ]);
+        $client->shouldReceive('get_profile')
+            ->once()
+            ->andReturnUsing(function ($access, $fallback) {
+                $this->assertSame('old-access', $access);
+                $replacement = $fallback($access);
+                $this->assertSame('new-access', $replacement);
+
+                return [
+                    'result' => true,
+                    'data'   => ['user_role' => 'user', 'end_date' => null],
+                ];
+            });
+
+        $profile = $this->service($client, $store)->get_profile();
+        $this->assertSame('user', $profile['user_role']);
+    }
+
+    /** @test */
+    public function find_refresh_updates_access_used_by_later_create_endpoint(): void
+    {
+        $client = $this->client();
+        $store  = $this->store();
+        $old    = $this->credentials();
+
+        $store->shouldReceive('get')
+            ->times(3)
+            ->andReturn($old, $old, $old);
+        $store->shouldReceive('acquire_lock')->once()->andReturn(true);
+        $store->shouldReceive('set')
+            ->once()
+            ->with(
+                'user@example.com',
+                self::UUID,
+                'new-access',
+                'new-refresh'
+            );
+        $store->shouldReceive('release_lock')->once();
+
+        $client->shouldReceive('refresh_access_token')
+            ->once()
+            ->andReturn([
+                'uuid'          => self::UUID,
+                'token'         => 'new-access',
+                'refresh_token' => 'new-refresh',
+            ]);
+        $client->shouldReceive('get_short_link')
+            ->once()
+            ->andReturnUsing(function ($access, $type, $itemId, $fallback) {
+                $this->assertSame('old-access', $access);
+                $this->assertSame('new-access', $fallback($access));
+                return $this->findResponse('');
+            });
+        $client->shouldReceive('create_site')
+            ->once()
+            ->with(
+                'new-access',
+                Mockery::type('array'),
+                Mockery::type('callable')
+            )
+            ->andReturn([
+                'result' => true,
+                'data'   => ['short_url' => 'https://lihi.io/new'],
+            ]);
+
+        $url = $this->service($client, $store)
+            ->get_or_create_short_url(42, 'post');
+
+        $this->assertSame('https://lihi.io/new', $url);
+    }
+
+    /** @test */
+    public function fallback_reuses_access_already_rotated_by_another_request(): void
+    {
+        $client = $this->client();
+        $store  = $this->store();
+        $old    = $this->credentials();
+        $new    = $this->credentials('new-access', 'new-refresh');
+
+        $store->shouldReceive('get')
+            ->twice()
+            ->andReturn($old, $new);
+        $store->shouldNotReceive('acquire_lock');
+        $store->shouldNotReceive('set');
+        $client->shouldNotReceive('refresh_access_token');
+        $client->shouldReceive('get_profile')
+            ->once()
+            ->andReturnUsing(function ($access, $fallback) {
+                $this->assertSame('new-access', $fallback($access));
+                return ['result' => true, 'data' => []];
+            });
+
+        $this->service($client, $store)->get_profile();
+        $this->assertTrue(true);
+    }
+
+    /** @test */
+    public function fallback_never_replays_an_old_request_under_a_new_login_session(): void
+    {
+        $client = $this->client();
+        $store  = $this->store();
+        $old    = $this->credentials();
+        $new    = $this->credentials(
+            'other-access',
+            'other-refresh',
+            '22222222-2222-4222-8222-222222222222',
+            'other@example.com'
+        );
+
+        $store->shouldReceive('get')
+            ->times(3)
+            ->andReturn($old, $new, $new);
+        $store->shouldNotReceive('acquire_lock');
+        $store->shouldNotReceive('set');
+        $store->shouldNotReceive('delete_if_access_token');
+
+        $client->shouldNotReceive('refresh_access_token');
+        $client->shouldReceive('get_profile')
+            ->once()
+            ->andReturnUsing(function ($access, $fallback) {
+                $this->assertSame('old-access', $access);
+                $fallback($access);
+                $this->fail('A changed login session must stop the request.');
+            });
+
+        $this->expectException(Lihi_Token_Invalid_Exception::class);
+        $this->expectExceptionMessage('connection changed');
+        $this->service($client, $store)->get_profile();
+    }
+
+    /** @test */
+    public function fallback_waits_for_lock_owner_and_reuses_its_rotation(): void
+    {
+        $client = $this->client();
+        $store  = $this->store();
+        $old    = $this->credentials();
+        $new    = $this->credentials('new-access', 'new-refresh');
+
+        $store->shouldReceive('get')
+            ->twice()
+            ->andReturn($old, $old);
+        $store->shouldReceive('acquire_lock')->once()->andReturn(false);
+        $store->shouldReceive('wait_for_access_token_change')
+            ->once()
+            ->with('old-access')
+            ->andReturn($new);
+        $store->shouldNotReceive('set');
+        $client->shouldNotReceive('refresh_access_token');
+        $client->shouldReceive('get_profile')
+            ->once()
+            ->andReturnUsing(function ($access, $fallback) {
+                $this->assertSame('new-access', $fallback($access));
+                return ['result' => true, 'data' => []];
+            });
+
+        $this->service($client, $store)->get_profile();
+        $this->assertTrue(true);
+    }
+
+    /** @test */
+    public function waiting_fallback_rejects_a_tuple_from_a_new_login_session(): void
+    {
+        $client = $this->client();
+        $store  = $this->store();
+        $old    = $this->credentials();
+        $new    = $this->credentials(
+            'other-access',
+            'other-refresh',
+            '22222222-2222-4222-8222-222222222222',
+            'other@example.com'
+        );
+
+        $store->shouldReceive('get')
+            ->times(3)
+            ->andReturn($old, $old, $new);
+        $store->shouldReceive('acquire_lock')->once()->andReturn(false);
+        $store->shouldReceive('wait_for_access_token_change')
+            ->once()
+            ->with('old-access')
+            ->andReturn($new);
+        $store->shouldNotReceive('set');
+        $store->shouldNotReceive('delete_if_access_token');
+        $client->shouldNotReceive('refresh_access_token');
+        $client->shouldReceive('get_profile')
+            ->once()
+            ->andReturnUsing(function ($access, $fallback) {
+                $fallback($access);
+            });
+
+        $this->expectException(Lihi_Token_Invalid_Exception::class);
+        $this->expectExceptionMessage('connection changed');
+        $this->service($client, $store)->get_profile();
+    }
+
+    /** @test */
+    public function locked_fallback_rechecks_the_login_session_before_refresh(): void
+    {
+        $client = $this->client();
+        $store  = $this->store();
+        $old    = $this->credentials();
+        $new    = $this->credentials(
+            'other-access',
+            'other-refresh',
+            '22222222-2222-4222-8222-222222222222',
+            'other@example.com'
+        );
+
+        $store->shouldReceive('get')
+            ->times(4)
+            ->andReturn($old, $old, $new, $new);
+        $store->shouldReceive('acquire_lock')->once()->andReturn(true);
+        $store->shouldReceive('release_lock')->once();
+        $store->shouldNotReceive('set');
+        $store->shouldNotReceive('delete_if_access_token');
+        $client->shouldNotReceive('refresh_access_token');
+        $client->shouldReceive('get_profile')
+            ->once()
+            ->andReturnUsing(function ($access, $fallback) {
+                $fallback($access);
+            });
+
+        $this->expectException(Lihi_Token_Invalid_Exception::class);
+        $this->expectExceptionMessage('connection changed');
+        $this->service($client, $store)->get_profile();
+    }
+
+    /** @test */
+    public function fallback_never_refreshes_independently_after_lock_timeout(): void
+    {
+        $client = $this->client();
+        $store  = $this->store();
+        $old    = $this->credentials();
+
+        $store->shouldReceive('get')
+            ->twice()
+            ->andReturn($old, $old);
+        $store->shouldReceive('acquire_lock')
+            ->twice()
+            ->andReturn(false, false);
+        $store->shouldReceive('wait_for_access_token_change')
+            ->once()
+            ->with('old-access')
+            ->andReturn(false);
+        $client->shouldNotReceive('refresh_access_token');
+        $client->shouldReceive('get_profile')
+            ->once()
+            ->andReturnUsing(function ($access, $fallback) {
+                $fallback($access);
+            });
+
+        $this->expectException(Lihi_Authentication_Busy_Exception::class);
+        $this->service($client, $store)->get_profile();
+    }
+
+    /** @test */
+    public function refresh_invalid_conditionally_clears_only_rejected_tuple(): void
+    {
+        $client = $this->client();
+        $store  = $this->store();
+        $old    = $this->credentials();
+
+        $store->shouldReceive('get')
+            ->times(4)
+            ->andReturn($old, $old, $old, false);
+        $store->shouldReceive('acquire_lock')->once()->andReturn(true);
+        $store->shouldReceive('delete_if_uuid')
+            ->once()
+            ->with(self::UUID)
+            ->andReturn(true);
+        $store->shouldReceive('release_lock')->once();
+
+        $client->shouldReceive('refresh_access_token')
+            ->once()
+            ->andThrow(
+                new Lihi_Refresh_Token_Invalid_Exception(
+                    'refresh token invalid'
+                )
+            );
+        $client->shouldReceive('get_profile')
+            ->once()
+            ->andReturnUsing(function ($access, $fallback) {
+                $fallback($access);
+            });
+
+        $this->expectException(Lihi_Token_Invalid_Exception::class);
+        $this->service($client, $store)->get_profile();
+    }
+
+    /**
+     * @return array<string, array{\Exception}>
+     */
+    public function refreshFailureProvider(): array
+    {
+        return [
+            'network/server' => [new Lihi_Server_Exception('network down')],
+            'rate limit' => [new Lihi_Rate_Limit_Exception('too many')],
+        ];
+    }
+
+    /**
+     * @dataProvider refreshFailureProvider
+     * @test
+     */
+    public function refresh_failure_clears_matching_credentials_and_requires_login(
+        \Exception $failure
+    ): void {
+        $client = $this->client();
+        $store  = $this->store();
+        $old    = $this->credentials();
+
+        $store->shouldReceive('get')
+            ->times(4)
+            ->andReturn($old, $old, $old, false);
+        $store->shouldReceive('acquire_lock')->once()->andReturn(true);
+        $store->shouldReceive('release_lock')->once();
+        $store->shouldNotReceive('delete');
+        $store->shouldReceive('delete_if_uuid')
+            ->once()
+            ->with(self::UUID)
+            ->andReturn(true);
+        $store->shouldNotReceive('set');
+
+        $client->shouldReceive('refresh_access_token')
+            ->once()
+            ->andThrow($failure);
+        $client->shouldReceive('get_profile')
+            ->once()
+            ->andReturnUsing(function ($access, $fallback) {
+                $fallback($access);
+            });
+
+        try {
+            $this->service($client, $store)->get_profile();
+            $this->fail('Expected refresh failure.');
+        } catch (Lihi_Token_Invalid_Exception $error) {
+            $this->assertStringContainsString(
+                'Please sign in again',
+                $error->getMessage()
+            );
+            $this->assertSame($failure, $error->getPrevious());
+        }
+    }
+
+    /** @test */
+    public function refresh_cleanup_failure_still_requires_login(): void
+    {
+        $client  = $this->client();
+        $store   = $this->store();
+        $old     = $this->credentials();
+        $failure = new Lihi_Server_Exception('refresh network failure');
+
+        $store->shouldReceive('get')
+            ->times(4)
+            ->andReturn($old, $old, $old, false);
+        $store->shouldReceive('acquire_lock')->once()->andReturn(true);
+        $store->shouldReceive('delete_if_uuid')
+            ->once()
+            ->with(self::UUID)
+            ->andThrow(new Lihi_Server_Exception('cleanup failed'));
+        $store->shouldReceive('release_lock')->once();
+
+        $client->shouldReceive('refresh_access_token')
+            ->once()
+            ->andThrow($failure);
+        $client->shouldReceive('get_profile')
+            ->once()
+            ->andReturnUsing(function ($access, $fallback) {
+                $fallback($access);
+            });
+
+        try {
+            $this->service($client, $store)->get_profile();
+            $this->fail('Expected refresh failure.');
+        } catch (Lihi_Token_Invalid_Exception $error) {
+            $this->assertStringContainsString(
+                'Please sign in again',
+                $error->getMessage()
+            );
+            $this->assertSame($failure, $error->getPrevious());
+        }
+    }
+
+    /** @test */
+    public function refresh_release_failure_never_hides_the_required_relogin_error(): void
+    {
+        $client  = $this->client();
+        $store   = $this->store();
+        $old     = $this->credentials();
+        $failure = new Lihi_Server_Exception('refresh network failure');
+
+        $store->shouldReceive('get')
+            ->times(4)
+            ->andReturn($old, $old, $old, false);
+        $store->shouldReceive('acquire_lock')->once()->andReturn(true);
+        $store->shouldReceive('delete_if_uuid')
+            ->once()
+            ->with(self::UUID)
+            ->andReturn(true);
+        $store->shouldReceive('release_lock')
+            ->once()
+            ->andThrow(new Lihi_Server_Exception('release failed'));
+
+        $client->shouldReceive('refresh_access_token')
+            ->once()
+            ->andThrow($failure);
+        $client->shouldReceive('get_profile')
+            ->once()
+            ->andReturnUsing(function ($access, $fallback) {
+                $fallback($access);
+            });
+
+        try {
+            $this->service($client, $store)->get_profile();
+            $this->fail('Expected refresh failure.');
+        } catch (Lihi_Token_Invalid_Exception $error) {
+            $this->assertStringContainsString(
+                'Please sign in again',
+                $error->getMessage()
+            );
+            $this->assertSame($failure, $error->getPrevious());
+        }
+    }
+
+    /** @test */
+    public function malformed_rotated_response_clears_now_unusable_old_tuple(): void
+    {
+        $client = $this->client();
+        $store  = $this->store();
+        $old    = $this->credentials();
+
+        $store->shouldReceive('get')
+            ->times(4)
+            ->andReturn($old, $old, $old, false);
+        $store->shouldReceive('acquire_lock')->once()->andReturn(true);
+        $store->shouldReceive('delete_if_uuid')
+            ->once()
+            ->with(self::UUID)
+            ->andReturn(true);
+        $store->shouldReceive('release_lock')->once();
+        $store->shouldNotReceive('set');
+
+        $client->shouldReceive('refresh_access_token')
+            ->once()
+            ->andReturn([
+                'uuid'          => '22222222-2222-4222-8222-222222222222',
+                'token'         => 'new-access',
+                'refresh_token' => 'new-refresh',
+            ]);
+        $client->shouldReceive('get_profile')
+            ->once()
+            ->andReturnUsing(function ($access, $fallback) {
+                $fallback($access);
+            });
+
+        $this->expectException(Lihi_Token_Invalid_Exception::class);
+        $this->expectExceptionMessage('Please sign in again');
+        $this->service($client, $store)->get_profile();
+    }
+
+    /** @test */
+    public function refresh_lease_loss_clears_the_old_session_and_requires_login(): void
+    {
+        $client = $this->client();
+        $store  = $this->store();
+        $old    = $this->credentials();
+
+        $store->shouldReceive('get')
+            ->times(4)
+            ->andReturn($old, $old, $old, false);
+        $store->shouldReceive('acquire_lock')->once()->andReturn(true);
+        $store->shouldReceive('renew_lock')->once()->andReturn(false);
+        $store->shouldReceive('delete_if_uuid')
+            ->once()
+            ->with(self::UUID)
+            ->andReturn(true);
+        $store->shouldReceive('release_lock')->once();
+        $store->shouldNotReceive('set');
+
+        $client->shouldReceive('refresh_access_token')
+            ->once()
+            ->andReturn([
+                'uuid'          => self::UUID,
+                'token'         => 'new-access',
+                'refresh_token' => 'new-refresh',
+            ]);
+        $client->shouldReceive('get_profile')
+            ->once()
+            ->andReturnUsing(function ($access, $fallback) {
+                $fallback($access);
+            });
+
+        $this->expectException(Lihi_Token_Invalid_Exception::class);
+        $this->expectExceptionMessage('Please sign in again');
+        $this->service($client, $store)->get_profile();
+    }
+
+    /** @test */
+    public function failed_refresh_persistence_clears_matching_credentials_and_requires_login(): void
+    {
+        $client = $this->client();
+        $store  = $this->store();
+        $old    = $this->credentials();
+
+        $store->shouldReceive('get')
+            ->times(4)
+            ->andReturn($old, $old, $old, false);
+        $store->shouldReceive('acquire_lock')->once()->andReturn(true);
+        $store->shouldReceive('set')
+            ->once()
+            ->andThrow(new Lihi_Server_Exception('database unavailable'));
+        $store->shouldReceive('delete_if_uuid')
+            ->once()
+            ->with(self::UUID)
+            ->andReturn(true);
+        $store->shouldReceive('release_lock')->once();
+
+        $client->shouldReceive('refresh_access_token')
+            ->once()
+            ->andReturn([
+                'uuid'          => self::UUID,
+                'token'         => 'new-access',
+                'refresh_token' => 'new-refresh',
+            ]);
+        $client->shouldReceive('get_profile')
+            ->once()
+            ->andReturnUsing(function ($access, $fallback) {
+                $fallback($access);
+            });
+
+        $this->expectException(Lihi_Token_Invalid_Exception::class);
+        $this->expectExceptionMessage('Please sign in again');
+        $this->service($client, $store)->get_profile();
+    }
+
+    /**
+     * @return array<string, array{\Exception}>
+     */
+    public function terminalProtectedFailureProvider(): array
+    {
+        return [
+            'invalid user' => [
+                new Lihi_User_Invalid_Exception('User Invalid'),
+            ],
+            'second 401' => [
+                new Lihi_Token_Invalid_Exception('access rejected again'),
             ],
         ];
     }
 
-    // -------------------------------------------------------------------------
-    // login()
-    // -------------------------------------------------------------------------
+    /**
+     * @dataProvider terminalProtectedFailureProvider
+     * @test
+     */
+    public function terminal_protected_failure_conditionally_clears_current_tuple(
+        \Exception $failure
+    ): void {
+        $client = $this->client();
+        $store  = $this->store();
+        $old    = $this->credentials();
 
-    /** @test */
-    public function login_returns_token_on_success(): void
-    {
-        $client = $this->makeClient();
-        $client->shouldReceive('login')
-            ->with('user@example.com')
-            ->once()
-            ->andReturn(['token' => 'jwt-token']);
-
-        $this->assertSame('jwt-token', $this->makeService($client)->login('user@example.com'));
-    }
-
-    /** @test */
-    public function login_throws_when_token_empty(): void
-    {
-        $client = $this->makeClient();
-        $client->shouldReceive('login')
-            ->with('user@example.com')
-            ->andReturn(['token' => '']);
-
-        Functions\when('__')->returnArg(1);
-
-        $this->expectException(\RuntimeException::class);
-        $this->makeService($client)->login('user@example.com');
-    }
-
-    /** @test */
-    public function login_propagates_client_exception(): void
-    {
-        $client = $this->makeClient();
-        $client->shouldReceive('login')
-            ->with('user@example.com')
-            ->andThrow(new \RuntimeException('Connection failed'));
-
-        $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage('Connection failed');
-        $this->makeService($client)->login('user@example.com');
-    }
-
-    // -------------------------------------------------------------------------
-    // get_token() — tested via get_or_create_short_url()
-    // -------------------------------------------------------------------------
-
-    /** @test */
-    public function get_token_reuses_transient_without_login(): void
-    {
-        $cachedToken = $this->makeJwt(time() + 3600);
-
-        $client = $this->makeClient();
-        $client->shouldReceive('get_short_link')
-            ->with($cachedToken, 'post:example.com', 3)
-            ->once()
-            ->andReturn($this->makeFindResponse('https://lihi.io/cached'));
-
-        $client->shouldNotReceive('login');
-
-        Functions\when('get_transient')->justReturn($cachedToken);
-        Functions\when('get_permalink')->justReturn('https://example.com/?p=3');
-
-        $result = $this->makeService($client)->get_or_create_short_url(3, 'post');
-        $this->assertSame('https://lihi.io/cached', $result);
-    }
-
-    /** @test */
-    public function get_token_reuses_transient_on_double_check_after_acquiring_lock(): void
-    {
-        $cachedToken = $this->makeJwt(time() + 3600);
-
-        $client = $this->makeClient();
-        $client->shouldReceive('get_short_link')
-            ->with($cachedToken, 'post:example.com', 13)
-            ->once()
-            ->andReturn($this->makeFindResponse('https://lihi.io/double'));
-
-        $client->shouldNotReceive('login');
-
-        // First call (initial read) misses; second (double-check inside lock) hits.
-        Functions\expect('get_transient')
+        $store->shouldReceive('get')
             ->twice()
-            ->andReturn(false, $cachedToken);
-        Functions\when('wp_cache_add')->justReturn(true);
-        Functions\when('wp_cache_delete')->justReturn(true);
-        Functions\when('get_permalink')->justReturn('https://example.com/?p=13');
+            ->andReturn($old, $old);
+        $store->shouldReceive('acquire_lock')->once()->andReturn(true);
+        $store->shouldReceive('delete_if_access_token')
+            ->once()
+            ->with('old-access')
+            ->andReturn(true);
+        $store->shouldReceive('release_lock')->once();
 
-        $result = $this->makeService($client)->get_or_create_short_url(13, 'post');
-        $this->assertSame('https://lihi.io/double', $result);
+        $client->shouldReceive('get_profile')
+            ->once()
+            ->andThrow($failure);
+
+        try {
+            $this->service($client, $store)->get_profile();
+            $this->fail('Expected terminal protected failure.');
+        } catch (\Exception $error) {
+            $this->assertSame($failure, $error);
+        }
     }
 
     /** @test */
-    public function get_token_calls_login_when_gets_lock_and_no_transient(): void
+    public function terminal_failure_never_deletes_credentials_rotated_concurrently(): void
     {
-        $newToken = $this->makeJwt(time() + 3600);
+        $client = $this->client();
+        $store  = $this->store();
+        $old    = $this->credentials();
+        $new    = $this->credentials('new-access', 'new-refresh');
 
-        $client = $this->makeClient();
-        $client->shouldReceive('get_short_link')
-            ->with($newToken, 'post:example.com', 5)
-            ->once()
-            ->andReturn($this->makeFindResponse('https://lihi.io/xyz'));
-
-        $client->shouldReceive('login')
-            ->with('user@example.com')
-            ->once()
-            ->andReturn(['token' => $newToken]);
-
-        Functions\when('Lihi\ShortUrl\lihi_email')->justReturn('user@example.com');
-        Functions\when('get_transient')->justReturn(false);
-        Functions\when('wp_cache_add')->justReturn(true);
-        Functions\when('wp_cache_delete')->justReturn(true);
-        Functions\when('set_transient')->justReturn(true);
-        Functions\when('get_permalink')->justReturn('https://example.com/?p=5');
-
-        $result = $this->makeService($client)->get_or_create_short_url(5, 'post');
-        $this->assertSame('https://lihi.io/xyz', $result);
-    }
-
-    /** @test */
-    public function get_token_waits_for_transient_when_lock_held_by_another_request(): void
-    {
-        $newToken = $this->makeJwt(time() + 3600);
-
-        $client = $this->makeClient();
-        $client->shouldReceive('get_short_link')
-            ->with($newToken, 'post:example.com', 9)
-            ->once()
-            ->andReturn($this->makeFindResponse('https://lihi.io/waited'));
-
-        $client->shouldNotReceive('login');
-
-        // First call returns false (cache miss), second returns token (winner stored it)
-        Functions\expect('get_transient')
+        $store->shouldReceive('get')
             ->twice()
-            ->andReturn(false, $newToken);
-        Functions\when('wp_cache_add')->justReturn(false); // lock already held
-        Functions\when('usleep')->justReturn(null);
-        Functions\when('get_permalink')->justReturn('https://example.com/?p=9');
-
-        $result = $this->makeService($client)->get_or_create_short_url(9, 'post');
-        $this->assertSame('https://lihi.io/waited', $result);
-    }
-
-    /** @test */
-    public function get_token_falls_back_to_login_after_wait_timeout_and_deletes_stale_lock(): void
-    {
-        $newToken = $this->makeJwt(time() + 3600);
-
-        $client = $this->makeClient();
-        $client->shouldReceive('get_short_link')
-            ->with($newToken, 'post:example.com', 11)
-            ->once()
-            ->andReturn($this->makeFindResponse('https://lihi.io/fallback'));
-
-        $client->shouldReceive('login')
-            ->with('user@example.com')
-            ->once()
-            ->andReturn(['token' => $newToken]);
-
-        Functions\when('Lihi\ShortUrl\lihi_email')->justReturn('user@example.com');
-        Functions\when('get_transient')->justReturn(false); // never appears
-        Functions\when('wp_cache_add')->justReturn(false);  // lock always held
-        Functions\when('usleep')->justReturn(null);
-        Functions\when('set_transient')->justReturn(true);
-        Functions\when('get_permalink')->justReturn('https://example.com/?p=11');
-
-        // Stale lock must be cleared after fallback login.
-        Functions\expect('wp_cache_delete')
-            ->once()
-            ->with('lihi_token_lock', 'transient')
-            ->andReturn(true);
-
-        $result = $this->makeService($client)->get_or_create_short_url(11, 'post');
-        $this->assertSame('https://lihi.io/fallback', $result);
-    }
-
-    /** @test */
-    public function get_token_propagates_login_exception(): void
-    {
-        $client = $this->makeClient();
-        $client->shouldReceive('login')
-            ->with('user@example.com')
-            ->andThrow(new \RuntimeException('Auth failed'));
-
-        Functions\when('Lihi\ShortUrl\lihi_email')->justReturn('user@example.com');
-        Functions\when('get_transient')->justReturn(false);
-        Functions\when('wp_cache_add')->justReturn(true);
-        Functions\when('wp_cache_delete')->justReturn(true);
-
-        $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage('Auth failed');
-        $this->makeService($client)->get_or_create_short_url(1, 'post');
-    }
-
-    // -------------------------------------------------------------------------
-    // get_profile()
-    // -------------------------------------------------------------------------
-
-    /** @test */
-    public function get_profile_returns_data_on_success(): void
-    {
-        Functions\when('get_transient')->justReturn($this->makeJwt(time() + 3600));
-
-        $client = $this->makeClient();
+            ->andReturn($old, $new);
+        $store->shouldNotReceive('acquire_lock');
+        $store->shouldNotReceive('delete_if_access_token');
         $client->shouldReceive('get_profile')
-            ->with(Mockery::type('string'))
             ->once()
-            ->andReturn([
-                'result' => true,
-                'data'   => [
-                    'user_role' => 'admin',
-                    'end_date'  => '2026-12-31',
-                ],
-            ]);
+            ->andThrow(new Lihi_User_Invalid_Exception('User Invalid'));
 
-        $result = $this->makeService($client)->get_profile();
-        $this->assertSame('admin', $result['user_role']);
-        $this->assertSame('2026-12-31', $result['end_date']);
-        $this->assertArrayNotHasKey('domains', $result);
+        $this->expectException(Lihi_User_Invalid_Exception::class);
+        $this->service($client, $store)->get_profile();
     }
 
     /** @test */
-    public function get_profile_logs_in_before_fetching_profile_when_token_is_missing(): void
+    public function create_workflow_preserves_url_tags_domain_and_utm_behavior(): void
     {
-        $token = $this->makeJwt(time() + 3600);
-
-        $client = $this->makeClient();
-        $client->shouldReceive('login')
-            ->with('user@example.com')
-            ->once()
-            ->andReturn(['token' => $token]);
-        $client->shouldReceive('get_profile')
-            ->with($token)
-            ->once()
-            ->andReturn([
-                'result' => true,
-                'data'   => [
-                    'user_role' => 'admin',
-                    'end_date'  => '2026-12-31',
-                ],
-            ]);
-
-        Functions\expect('get_transient')->andReturn(false, false);
-        Functions\when('wp_cache_add')->justReturn(true);
-        Functions\when('set_transient')->justReturn(true);
-        Functions\when('wp_cache_delete')->justReturn(true);
-
-        $result = $this->makeService($client)->get_profile();
-        $this->assertSame('admin', $result['user_role']);
-    }
-
-    /** @test */
-    public function get_profile_retries_once_on_token_invalid(): void
-    {
-        $staleToken = $this->makeJwt(time() + 3600);
-        $freshToken = $this->makeJwt(time() + 7200);
-
-        $client = $this->makeClient();
-        $client->shouldReceive('get_profile')
-            ->with($staleToken)
-            ->once()
-            ->andThrow(new \Lihi\ShortUrl\Lihi_Token_Invalid_Exception('HTTP 500: 網站升級中...'));
-        $client->shouldReceive('get_profile')
-            ->with($freshToken)
-            ->once()
-            ->andReturn(['result' => true, 'data' => ['user_role' => 'user', 'end_date' => null]]);
-
-        $client->shouldReceive('login')
-            ->with('user@example.com')
-            ->once()
-            ->andReturn(['token' => $freshToken]);
-
-        Functions\when('Lihi\ShortUrl\lihi_email')->justReturn('user@example.com');
-        Functions\when('delete_transient')->justReturn(true);
-        Functions\expect('get_transient')->andReturn($staleToken, false, false);
-        Functions\when('wp_cache_add')->justReturn(true);
-        Functions\when('wp_cache_delete')->justReturn(true);
-        Functions\when('set_transient')->justReturn(true);
-
-        $result = $this->makeService($client)->get_profile();
-        $this->assertSame('user', $result['user_role']);
-    }
-
-    /** @test */
-    public function get_profile_clears_token_and_propagates_user_invalid_without_retry(): void
-    {
-        $staleToken = $this->makeJwt(time() + 3600);
-
-        $client = $this->makeClient();
-        $client->shouldReceive('get_profile')
-            ->with($staleToken)
-            ->once()
-            ->andThrow(new \Lihi\ShortUrl\Lihi_User_Invalid_Exception('HTTP 404: user_not_found ,please login again'));
-        $client->shouldNotReceive('login');
-
-        Functions\expect('get_transient')
-            ->once()
-            ->andReturn($staleToken);
-        Functions\expect('delete_transient')
-            ->once()
-            ->with('lihi_token')
-            ->andReturn(true);
-
-        $this->expectException(\Lihi\ShortUrl\Lihi_User_Invalid_Exception::class);
-        $this->makeService($client)->get_profile();
-    }
-
-    /** @test */
-    public function get_profile_propagates_auth_exception_from_login(): void
-    {
-        $client = $this->makeClient();
-        $client->shouldReceive('login')
-            ->with('user@example.com')
-            ->once()
-            ->andThrow(new \Lihi\ShortUrl\Lihi_Auth_Exception('email not verified'));
-
-        Functions\when('Lihi\ShortUrl\lihi_email')->justReturn('user@example.com');
-        Functions\when('get_transient')->justReturn(false);
-        Functions\when('wp_cache_add')->justReturn(true);
-        Functions\when('wp_cache_delete')->justReturn(true);
-
-        $this->expectException(\Lihi\ShortUrl\Lihi_Auth_Exception::class);
-        $this->makeService($client)->get_profile();
-    }
-
-    /** @test */
-    public function get_profile_propagates_user_invalid_exception_from_login(): void
-    {
-        $client = $this->makeClient();
-        $client->shouldReceive('login')
-            ->with('user@example.com')
-            ->once()
-            ->andThrow(new \Lihi\ShortUrl\Lihi_User_Invalid_Exception('User Invalid'));
-
-        Functions\when('get_transient')->justReturn(false);
-        Functions\when('wp_cache_add')->justReturn(true);
-        Functions\when('wp_cache_delete')->justReturn(true);
-
-        $this->expectException(\Lihi\ShortUrl\Lihi_User_Invalid_Exception::class);
-        $this->makeService($client)->get_profile();
-    }
-
-    // -------------------------------------------------------------------------
-    // get_url_options()
-    // -------------------------------------------------------------------------
-
-    /** @test */
-    public function get_url_options_fetches_options_endpoint(): void
-    {
-        $token = $this->makeJwt(time() + 3600);
-        Functions\when('get_transient')->justReturn($token);
-
-        $client = $this->makeClient();
-        $client->shouldReceive('get_options')
-            ->with($token)
-            ->once()
-            ->andReturn([
-                'result' => true,
-                'data'   => [
-                    'domains'     => [['id' => 1, 'name' => 'go.example.com']],
-                    'utm_sources' => ['facebook'],
-                    'utm_mediums' => ['social'],
-                ],
-            ]);
-
-        $result = $this->makeService($client)->get_url_options();
-        $this->assertSame([['id' => 1, 'name' => 'go.example.com']], $result['domains']);
-        $this->assertSame(['facebook'], $result['utm_sources']);
-        $this->assertSame(['social'], $result['utm_mediums']);
-    }
-
-    /** @test */
-    public function get_url_options_retries_once_on_token_invalid(): void
-    {
-        $staleToken = $this->makeJwt(time() + 3600);
-        $freshToken = $this->makeJwt(time() + 7200);
-
-        $client = $this->makeClient();
-        $client->shouldReceive('get_options')
-            ->with($staleToken)
-            ->once()
-            ->andThrow(new \Lihi\ShortUrl\Lihi_Token_Invalid_Exception('Token expired'));
-        $client->shouldReceive('get_options')
-            ->with($freshToken)
-            ->once()
-            ->andReturn([
-                'result' => true,
-                'data'   => [
-                    'domains'     => [],
-                    'utm_sources' => ['newsletter'],
-                    'utm_mediums' => ['email'],
-                ],
-            ]);
-        $client->shouldReceive('login')
-            ->with('user@example.com')
-            ->once()
-            ->andReturn(['token' => $freshToken]);
-
-        Functions\when('Lihi\ShortUrl\lihi_email')->justReturn('user@example.com');
-        Functions\when('delete_transient')->justReturn(true);
-        Functions\expect('get_transient')->andReturn($staleToken, false, false);
-        Functions\when('wp_cache_add')->justReturn(true);
-        Functions\when('wp_cache_delete')->justReturn(true);
-        Functions\when('set_transient')->justReturn(true);
-
-        $result = $this->makeService($client)->get_url_options();
-        $this->assertSame(['newsletter'], $result['utm_sources']);
-        $this->assertSame(['email'], $result['utm_mediums']);
-    }
-
-    // -------------------------------------------------------------------------
-    // create_passthrough_nonce()
-    // -------------------------------------------------------------------------
-
-    /** @test */
-    public function create_passthrough_nonce_returns_nonce_with_cached_token(): void
-    {
-        $token = $this->makeJwt(time() + 3600);
-        $challenge = str_repeat('A', 43);
-
-        $client = $this->makeClient();
-        $client->shouldReceive('create_passthrough_nonce')
-            ->with($token, 'https://lihi.io/existing', $challenge)
-            ->once()
-            ->andReturn(['result' => true, 'data' => ['nonce' => 'nonce-token']]);
-        $client->shouldNotReceive('login');
-
-        Functions\when('get_transient')->justReturn($token);
-
-        $result = $this->makeService($client)->create_passthrough_nonce('https://lihi.io/existing', $challenge);
-        $this->assertSame('nonce-token', $result);
-    }
-
-    /** @test */
-    public function create_passthrough_nonce_throws_when_nonce_empty(): void
-    {
-        $token = $this->makeJwt(time() + 3600);
-        $challenge = str_repeat('A', 43);
-
-        $client = $this->makeClient();
-        $client->shouldReceive('create_passthrough_nonce')
-            ->with($token, 'https://lihi.io/existing', $challenge)
-            ->once()
-            ->andReturn(['result' => true, 'data' => []]);
-
-        Functions\when('get_transient')->justReturn($token);
-
-        $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage('No passthrough nonce');
-        $this->makeService($client)->create_passthrough_nonce('https://lihi.io/existing', $challenge);
-    }
-
-    /** @test */
-    public function create_passthrough_nonce_retries_once_on_token_invalid(): void
-    {
-        $staleToken = $this->makeJwt(time() + 3600);
-        $freshToken = $this->makeJwt(time() + 7200);
-        $challenge = str_repeat('A', 43);
-
-        $client = $this->makeClient();
-        $client->shouldReceive('create_passthrough_nonce')
-            ->with($staleToken, 'https://lihi.io/existing', $challenge)
-            ->once()
-            ->andThrow(new \Lihi\ShortUrl\Lihi_Token_Invalid_Exception('HTTP 500: Token expired ,please login again'));
-        $client->shouldReceive('create_passthrough_nonce')
-            ->with($freshToken, 'https://lihi.io/existing', $challenge)
-            ->once()
-            ->andReturn(['result' => true, 'data' => ['nonce' => 'fresh-nonce']]);
-        $client->shouldReceive('login')
-            ->with('user@example.com')
-            ->once()
-            ->andReturn(['token' => $freshToken]);
-
-        Functions\when('Lihi\ShortUrl\lihi_email')->justReturn('user@example.com');
-        Functions\when('delete_transient')->justReturn(true);
-        Functions\expect('get_transient')->andReturn($staleToken, false, false);
-        Functions\when('wp_cache_add')->justReturn(true);
-        Functions\when('wp_cache_delete')->justReturn(true);
-        Functions\when('set_transient')->justReturn(true);
-
-        $result = $this->makeService($client)->create_passthrough_nonce('https://lihi.io/existing', $challenge);
-        $this->assertSame('fresh-nonce', $result);
-    }
-
-    // -------------------------------------------------------------------------
-    // get_or_create_short_url()
-    // -------------------------------------------------------------------------
-
-    /** @test */
-    public function get_or_create_returns_existing_short_url_without_creating(): void
-    {
-        Functions\when('get_transient')->justReturn($this->makeJwt(time() + 3600));
-
-        $client = $this->makeClient();
-        $client->shouldReceive('get_short_link')
-            ->with(Mockery::type('string'), 'post:example.com', 42)
-            ->once()
-            ->andReturn($this->makeFindResponse('https://lihi.io/existing'));
-        $client->shouldNotReceive('create_site');
-
-        Functions\when('get_permalink')->justReturn('https://example.com/?p=42');
-
-        $result = $this->makeService($client)->get_or_create_short_url(42, 'post');
-        $this->assertSame('https://lihi.io/existing', $result);
-    }
-
-    /** @test */
-    public function get_or_create_calls_create_when_no_match_found(): void
-    {
-        Functions\when('get_transient')->justReturn($this->makeJwt(time() + 3600));
-
-        $client = $this->makeClient();
-        $client->shouldReceive('get_short_link')
-            ->once()
-            ->andReturn($this->makeFindResponse(''));
-        $client->shouldReceive('create_site')
-            ->once()
-            ->andReturn(['data' => ['short_url' => 'https://lihi.io/new']]);
-
-        Functions\when('get_permalink')->justReturn('https://example.com/?p=42');
-        Functions\when('home_url')->justReturn('https://example.com');
-        Functions\when('wp_parse_url')->justReturn('example.com');
-
-        $result = $this->makeService($client)->get_or_create_short_url(42, 'post');
-        $this->assertSame('https://lihi.io/new', $result);
-    }
-
-    /** @test */
-    public function get_or_create_throws_when_create_returns_empty_site_name(): void
-    {
-        Functions\when('get_transient')->justReturn($this->makeJwt(time() + 3600));
-
-        $client = $this->makeClient();
-        $client->shouldReceive('get_short_link')
-            ->andReturn($this->makeFindResponse(''));
-        $client->shouldReceive('create_site')
-            ->andReturn(['data' => ['short_url' => '']]);
-
-        Functions\when('get_permalink')->justReturn('https://example.com/?p=42');
-        Functions\when('home_url')->justReturn('https://example.com');
-        Functions\when('wp_parse_url')->justReturn('example.com');
-        Functions\when('__')->returnArg(1);
-
-        $this->expectException(\RuntimeException::class);
-        $this->makeService($client)->get_or_create_short_url(42, 'post');
-    }
-
-    /** @test */
-    public function get_or_create_returns_site_from_find_response(): void
-    {
-        Functions\when('get_transient')->justReturn($this->makeJwt(time() + 3600));
-
-        $client = $this->makeClient();
-        $client->shouldReceive('get_short_link')
-            ->andReturn($this->makeFindResponse('https://lihi.io/found'));
-        $client->shouldNotReceive('create_site');
-
-        Functions\when('get_permalink')->justReturn('https://example.com/?p=42');
-
-        $result = $this->makeService($client)->get_or_create_short_url(42, 'post');
-        $this->assertSame('https://lihi.io/found', $result);
-    }
-
-    /** @test */
-    public function get_or_create_passes_correct_body_to_create_site(): void
-    {
-        Functions\when('get_transient')->justReturn($this->makeJwt(time() + 3600));
-
-        $client = $this->makeClient();
-        $client->shouldReceive('get_short_link')
-            ->andReturn($this->makeFindResponse(''));
-
+        $client      = $this->client();
+        $store       = $this->store();
         $capturedBody = null;
-        $client->shouldReceive('create_site')
+
+        $store->shouldReceive('get')
             ->once()
-            ->andReturnUsing(function ($token, $body) use (&$capturedBody) {
-                $capturedBody = $body;
-                return ['data' => ['short_url' => 'https://lihi.io/new']];
-            });
-
-        Functions\when('get_permalink')->justReturn('https://example.com/?p=42');
-        Functions\when('home_url')->justReturn('https://example.com');
-        Functions\when('wp_parse_url')->justReturn('example.com');
-
-        $this->makeService($client)->get_or_create_short_url(42, 'post');
-
-        $this->assertSame(['https://example.com/?p=42'], $capturedBody['urls']);
-        $this->assertSame('post:example.com', $capturedBody['type']);
-        $this->assertSame('42', $capturedBody['type_id']);
-        // The create AJAX flow supplies the modal domain; lower-level callers
-        // that omit it still pass an empty string through to the API.
-        $this->assertSame('', $capturedBody['domain']);
-        // tags are sent to the SaaS API as a comma-separated string only
-        // when the modal supplies selected tags.
-        $this->assertSame('', $capturedBody['tags']);
-        $this->assertArrayNotHasKey('utm', $capturedBody);
-    }
-
-    /** @test */
-    public function get_or_create_passes_modal_options_to_create_site(): void
-    {
-        Functions\when('get_transient')->justReturn($this->makeJwt(time() + 3600));
-
-        $client = $this->makeClient();
+            ->andReturn($this->credentials());
         $client->shouldReceive('get_short_link')
-            ->andReturn($this->makeFindResponse(''));
-
-        $capturedBody = null;
+            ->once()
+            ->with(
+                'old-access',
+                'post:example.com',
+                42,
+                Mockery::type('callable')
+            )
+            ->andReturn($this->findResponse(''));
         $client->shouldReceive('create_site')
             ->once()
-            ->andReturnUsing(function ($token, $body) use (&$capturedBody) {
-                $capturedBody = $body;
-                return ['data' => ['short_url' => 'https://lihi.io/new']];
-            });
+            ->andReturnUsing(
+                function ($access, $body, $fallback) use (&$capturedBody) {
+                    $this->assertSame('old-access', $access);
+                    $this->assertIsCallable($fallback);
+                    $capturedBody = $body;
+                    return [
+                        'result' => true,
+                        'data'   => ['short_url' => 'https://lihi.io/new'],
+                    ];
+                }
+            );
 
-        Functions\when('get_permalink')->justReturn('https://example.com/post');
+        $url = $this->service($client, $store)
+            ->get_or_create_short_url(42, 'post', [
+                'domain' => 'go.example.com',
+                'tags'   => ['campaign', 'wordpress', 'campaign'],
+                'utm'    => [
+                    'source'  => 'newsletter',
+                    'medium'  => 'email',
+                    'ignored' => 'value',
+                ],
+            ]);
 
-        $this->makeService($client)->get_or_create_short_url(42, 'post', [
-            'domain' => 'go.example.com',
-            'tags'   => ['campaign', 'wordpress', 'campaign'],
-            'utm'    => ['source' => 'newsletter', 'medium' => 'email', 'ignored' => 'x'],
-        ]);
-
+        $this->assertSame('https://lihi.io/new', $url);
         $this->assertSame('go.example.com', $capturedBody['domain']);
         $this->assertSame('campaign,wordpress', $capturedBody['tags']);
-        $this->assertSame(['https://example.com/post?utm_source=newsletter&utm_medium=email'], $capturedBody['urls']);
+        $this->assertSame('post:example.com', $capturedBody['type']);
+        $this->assertSame('42', $capturedBody['type_id']);
+        $this->assertSame([
+            'https://example.com/?p=42&utm_source=newsletter&utm_medium=email',
+        ], $capturedBody['urls']);
         $this->assertArrayNotHasKey('utm', $capturedBody);
     }
 
     /** @test */
-    public function get_or_create_uses_attachment_url_for_attachment_type(): void
+    public function existing_short_url_never_calls_create(): void
     {
-        Functions\when('get_transient')->justReturn($this->makeJwt(time() + 3600));
+        $client = $this->client();
+        $store  = $this->store();
 
-        $client = $this->makeClient();
-        $client->shouldReceive('get_short_link')
-            ->andReturn($this->makeFindResponse(''));
-
-        $capturedBody = null;
-        $client->shouldReceive('create_site')
+        $store->shouldReceive('get')
             ->once()
-            ->andReturnUsing(function ($token, $body) use (&$capturedBody) {
-                $capturedBody = $body;
-                return ['data' => ['short_url' => 'https://lihi.io/img']];
-            });
-
-        Functions\when('wp_get_attachment_url')->justReturn('https://example.com/wp-content/uploads/photo.jpg');
-        Functions\when('home_url')->justReturn('https://example.com');
-        Functions\when('wp_parse_url')->justReturn('example.com');
-
-        $this->makeService($client)->get_or_create_short_url(7, 'attachment');
-
-        $this->assertSame(['https://example.com/wp-content/uploads/photo.jpg'], $capturedBody['urls']);
-    }
-
-    /** @test */
-    public function get_or_create_namespaces_api_type_with_wp_host_for_get_short_link(): void
-    {
-        Functions\when('get_transient')->justReturn($this->makeJwt(time() + 3600));
-
-        // Override the setUp default so we can verify the host propagates into $api_type.
-        Functions\when('home_url')->justReturn('https://shop.example.org');
-        Functions\when('wp_parse_url')->justReturn('shop.example.org');
-
-        $capturedType = null;
-        $client = $this->makeClient();
+            ->andReturn($this->credentials());
         $client->shouldReceive('get_short_link')
             ->once()
-            ->andReturnUsing(function ($token, $type, $itemId) use (&$capturedType) {
-                $capturedType = $type;
-                return $this->makeFindResponse('');
-            });
-        $client->shouldReceive('create_site')
-            ->andReturn(['data' => ['short_url' => 'https://lihi.io/new']]);
-
-        Functions\when('get_permalink')->justReturn('https://shop.example.org/?p=42');
-
-        $this->makeService($client)->get_or_create_short_url(42, 'post');
-
-        $this->assertSame('post:shop.example.org', $capturedType);
-    }
-
-    /** @test */
-    public function get_or_create_does_not_add_default_tags_to_namespaced_type(): void
-    {
-        Functions\when('get_transient')->justReturn($this->makeJwt(time() + 3600));
-
-        $client = $this->makeClient();
-        $client->shouldReceive('get_short_link')
-            ->andReturn($this->makeFindResponse(''));
-
-        $capturedBody = null;
-        $client->shouldReceive('create_site')
-            ->once()
-            ->andReturnUsing(function ($token, $body) use (&$capturedBody) {
-                $capturedBody = $body;
-                return ['data' => ['short_url' => 'https://lihi.io/img']];
-            });
-
-        Functions\when('wp_get_attachment_url')->justReturn('https://example.com/uploads/a.jpg');
-
-        $this->makeService($client)->get_or_create_short_url(7, 'attachment');
-
-        $this->assertSame('attachment:example.com', $capturedBody['type']);
-        $this->assertSame('', $capturedBody['tags']);
-    }
-
-    /** @test */
-    public function get_existing_returns_short_url_without_creating(): void
-    {
-        Functions\when('get_transient')->justReturn($this->makeJwt(time() + 3600));
-
-        $client = $this->makeClient();
-        $client->shouldReceive('get_short_link')
-            ->with(Mockery::any(), 'post:example.com', 42)
-            ->once()
-            ->andReturn($this->makeFindResponse('https://lihi.io/existing'));
+            ->andReturn($this->findResponse('https://lihi.io/existing'));
         $client->shouldNotReceive('create_site');
 
-        $result = $this->makeService($client)->get_existing_short_url(42, 'post');
+        $url = $this->service($client, $store)
+            ->get_or_create_short_url(42, 'post');
 
-        $this->assertSame('https://lihi.io/existing', $result);
+        $this->assertSame('https://lihi.io/existing', $url);
     }
 
     /** @test */
-    public function get_existing_throws_not_found_when_short_url_is_missing(): void
+    public function copy_only_flow_throws_when_short_url_is_missing(): void
     {
-        Functions\when('get_transient')->justReturn($this->makeJwt(time() + 3600));
+        $client = $this->client();
+        $store  = $this->store();
 
-        $client = $this->makeClient();
-        $client->shouldReceive('get_short_link')
-            ->with(Mockery::any(), 'post:example.com', 42)
+        $store->shouldReceive('get')
             ->once()
-            ->andReturn($this->makeFindResponse(''));
+            ->andReturn($this->credentials());
+        $client->shouldReceive('get_short_link')
+            ->once()
+            ->andReturn($this->findResponse(''));
         $client->shouldNotReceive('create_site');
 
-        $this->expectException(\Lihi\ShortUrl\Lihi_Not_Found_Exception::class);
-        $this->makeService($client)->get_existing_short_url(42, 'post');
-    }
-
-    // -------------------------------------------------------------------------
-    // get_or_create_short_url() — token-invalid retry
-    // -------------------------------------------------------------------------
-
-    /** @test */
-    public function get_or_create_retries_once_when_get_short_link_throws_token_invalid(): void
-    {
-        $staleToken = $this->makeJwt(time() + 3600);
-        $freshToken = $this->makeJwt(time() + 7200);
-
-        $client = $this->makeClient();
-        $client->shouldReceive('get_short_link')
-            ->with($staleToken, 'post:example.com', 42)
-            ->once()
-            ->andThrow(new \Lihi\ShortUrl\Lihi_Token_Invalid_Exception('HTTP 500: 網站升級中...'));
-        $client->shouldReceive('get_short_link')
-            ->with($freshToken, 'post:example.com', 42)
-            ->once()
-            ->andReturn($this->makeFindResponse('https://lihi.io/retried'));
-
-        $client->shouldReceive('login')
-            ->with('user@example.com')
-            ->once()
-            ->andReturn(['token' => $freshToken]);
-
-        Functions\when('Lihi\ShortUrl\lihi_email')->justReturn('user@example.com');
-        Functions\when('delete_transient')->justReturn(true);
-        // First read returns stale token; after invalidate_token, next reads return false
-        // so the lock path takes over and login() is called.
-        Functions\expect('get_transient')
-            ->andReturn($staleToken, false, false);
-        Functions\when('wp_cache_add')->justReturn(true);
-        Functions\when('wp_cache_delete')->justReturn(true);
-        Functions\when('set_transient')->justReturn(true);
-        Functions\when('get_permalink')->justReturn('https://example.com/?p=42');
-
-        $result = $this->makeService($client)->get_or_create_short_url(42, 'post');
-        $this->assertSame('https://lihi.io/retried', $result);
+        $this->expectException(Lihi_Not_Found_Exception::class);
+        $this->service($client, $store)
+            ->get_existing_short_url(42, 'post');
     }
 
     /** @test */
-    public function get_or_create_clears_token_and_propagates_user_invalid_without_retry(): void
+    public function passthrough_returns_nonce_from_protected_client(): void
     {
-        $staleToken = $this->makeJwt(time() + 3600);
+        $client    = $this->client();
+        $store     = $this->store();
+        $challenge = str_repeat('A', 43);
 
-        $client = $this->makeClient();
-        $client->shouldReceive('get_short_link')
-            ->with($staleToken, 'post:example.com', 42)
+        $store->shouldReceive('get')
             ->once()
-            ->andThrow(new \Lihi\ShortUrl\Lihi_User_Invalid_Exception('HTTP 404: user_not_found ,please login again'));
-        $client->shouldNotReceive('login');
-        $client->shouldNotReceive('create_site');
+            ->andReturn($this->credentials());
+        $client->shouldReceive('create_passthrough_nonce')
+            ->once()
+            ->with(
+                'old-access',
+                '/myDomain',
+                $challenge,
+                Mockery::type('callable')
+            )
+            ->andReturn([
+                'result' => true,
+                'data'   => ['nonce' => 'nonce-token'],
+            ]);
 
-        Functions\expect('get_transient')
-            ->once()
-            ->andReturn($staleToken);
-        Functions\expect('delete_transient')
-            ->once()
-            ->with('lihi_token')
-            ->andReturn(true);
+        $nonce = $this->service($client, $store)
+            ->create_passthrough_nonce('/myDomain', $challenge);
 
-        $this->expectException(\Lihi\ShortUrl\Lihi_User_Invalid_Exception::class);
-        $this->makeService($client)->get_or_create_short_url(42, 'post');
+        $this->assertSame('nonce-token', $nonce);
     }
-
-    /** @test */
-    public function get_or_create_retries_once_when_create_site_throws_token_invalid(): void
-    {
-        $staleToken = $this->makeJwt(time() + 3600);
-        $freshToken = $this->makeJwt(time() + 7200);
-
-        $client = $this->makeClient();
-        $client->shouldReceive('get_short_link')
-            ->with($staleToken, 'post:example.com', 42)
-            ->once()
-            ->andReturn($this->makeFindResponse(''));
-        $client->shouldReceive('create_site')
-            ->with($staleToken, Mockery::any())
-            ->once()
-            ->andThrow(new \Lihi\ShortUrl\Lihi_Token_Invalid_Exception('HTTP 500: 網站升級中...'));
-        $client->shouldReceive('get_short_link')
-            ->with($freshToken, 'post:example.com', 42)
-            ->once()
-            ->andReturn($this->makeFindResponse(''));
-        $client->shouldReceive('create_site')
-            ->with($freshToken, Mockery::any())
-            ->once()
-            ->andReturn(['data' => ['short_url' => 'https://lihi.io/created']]);
-
-        $client->shouldReceive('login')
-            ->with('user@example.com')
-            ->once()
-            ->andReturn(['token' => $freshToken]);
-
-        Functions\when('Lihi\ShortUrl\lihi_email')->justReturn('user@example.com');
-        Functions\when('delete_transient')->justReturn(true);
-        Functions\expect('get_transient')
-            ->andReturn($staleToken, false, false);
-        Functions\when('wp_cache_add')->justReturn(true);
-        Functions\when('wp_cache_delete')->justReturn(true);
-        Functions\when('set_transient')->justReturn(true);
-        Functions\when('get_permalink')->justReturn('https://example.com/?p=42');
-        Functions\when('home_url')->justReturn('https://example.com');
-        Functions\when('wp_parse_url')->justReturn('example.com');
-
-        $result = $this->makeService($client)->get_or_create_short_url(42, 'post');
-        $this->assertSame('https://lihi.io/created', $result);
-    }
-
-    /** @test */
-    public function get_or_create_propagates_token_invalid_exception_on_second_failure(): void
-    {
-        $staleToken = $this->makeJwt(time() + 3600);
-        $freshToken = $this->makeJwt(time() + 7200);
-
-        $client = $this->makeClient();
-        $client->shouldReceive('get_short_link')
-            ->with($staleToken, 'post:example.com', 42)
-            ->once()
-            ->andThrow(new \Lihi\ShortUrl\Lihi_Token_Invalid_Exception('HTTP 500: 網站升級中...'));
-        $client->shouldReceive('get_short_link')
-            ->with($freshToken, 'post:example.com', 42)
-            ->once()
-            ->andThrow(new \Lihi\ShortUrl\Lihi_Token_Invalid_Exception('HTTP 500: 網站升級中...'));
-
-        $client->shouldReceive('login')
-            ->with('user@example.com')
-            ->once()
-            ->andReturn(['token' => $freshToken]);
-
-        Functions\when('Lihi\ShortUrl\lihi_email')->justReturn('user@example.com');
-        Functions\when('delete_transient')->justReturn(true);
-        Functions\expect('get_transient')
-            ->andReturn($staleToken, false, false);
-        Functions\when('wp_cache_add')->justReturn(true);
-        Functions\when('wp_cache_delete')->justReturn(true);
-        Functions\when('set_transient')->justReturn(true);
-
-        $this->expectException(\Lihi\ShortUrl\Lihi_Token_Invalid_Exception::class);
-        $this->makeService($client)->get_or_create_short_url(42, 'post');
-    }
-
 }

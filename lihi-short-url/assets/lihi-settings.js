@@ -1,87 +1,156 @@
 document.addEventListener( 'DOMContentLoaded', () => {
-	bindPasswordToggle();
-	bindSaver( {
-		buttonId: 'lihi-save-email',
-		statusId: 'lihi-email-status',
-		action:   lihiSettings.emailAction,
-		nonce:    lihiSettings.emailNonce,
-		payload:  () => {
-			const input = document.getElementById( 'lihi_email' );
-			const password = document.getElementById( 'lihi_account_password' );
-			const consent = document.getElementById( 'lihi_email_consent' );
-
-			return {
-				email: input.value,
-				account_password: password?.value || '',
-				create_account_consent: consent?.checked ? '1' : '0',
-			};
-		},
-		validate: () => {
-			const input = document.getElementById( 'lihi_email' );
-			const password = document.getElementById( 'lihi_account_password' );
-			const consent = document.getElementById( 'lihi_email_consent' );
-			if ( input.value.trim() === '' ) return '';
-
-			if ( ! password?.value.trim() ) {
-				return lihiSettings.emailPasswordRequired ||
-					'Please enter the lihi account password.';
-			}
-
-			if ( consent?.checked ) {
-				return '';
-			}
-
-			return lihiSettings.emailConsentRequired ||
-				'Please confirm that lihi may use this email and password to create an account if one does not already exist.';
-		},
-		successMessage: ( data ) => data.message,
-		// The Account section belongs to the previous JWT; clear it on every
-		// successful email update so a "verification email sent" response can't
-		// leave stale account data from the prior email visible. When verified
-		// server-side, reload so render_settings_page() can call get_profile()
-		// with the fresh JWT and repaint the section inline. Delay the reload so
-		// the admin can actually read the email verified notice first.
-		onSuccess: ( data ) => {
-			document.getElementById( 'lihi-account-section' )?.replaceChildren();
-			if ( data.verified ) {
-				setTimeout( () => window.location.reload(), 2000 );
-			}
-		},
-	} );
-	bindSaver( {
-		buttonId: 'lihi-logout-email',
-		statusId: 'lihi-email-status',
-		action:   lihiSettings.emailAction,
-		nonce:    lihiSettings.emailNonce,
-		payload:  () => ( { email: '' } ),
-		validate: () => '',
-		successMessage: ( data ) => data.message,
-		onSuccess: () => {
-			setTimeout( () => window.location.reload(), 800 );
-		},
-	} );
-
+	bindPasswordToggles();
+	bindLoginForm();
+	bindRegisterForm();
+	bindLogout();
 	bindDashboardPassthrough();
 } );
 
-function bindPasswordToggle() {
-	const input = document.getElementById( 'lihi_account_password' );
-	const button = document.getElementById( 'lihi-toggle-password' );
-	const icon = button?.querySelector( '.dashicons' );
-	if ( ! input || ! button || ! icon ) return;
+function bindLoginForm() {
+	bindAuthForm( {
+		formId: 'lihi-login-form',
+		statusId: 'lihi-login-status',
+		config: lihiSettings.login,
+		payload: ( form ) => ( {
+			email: form.querySelector( '#lihi_login_email' )?.value ?? '',
+			password: form.querySelector( '#lihi_login_password' )?.value ?? '',
+		} ),
+		validate: ( form ) => {
+			const email = form.querySelector( '#lihi_login_email' );
+			const password = form.querySelector( '#lihi_login_password' );
+			if ( ! email?.value.trim() || ! email.validity.valid ) {
+				return {
+					field: email,
+					message: lihiSettings.login?.emailRequired ||
+						'Please enter a valid email address.',
+				};
+			}
+			if ( ! password?.value.trim() ) {
+				return {
+					field: password,
+					message: lihiSettings.login?.passwordRequired ||
+						'Please enter the lihi account password.',
+				};
+			}
+			return null;
+		},
+		onSuccess: ( data, form ) => {
+			const password = form.querySelector( '#lihi_login_password' );
+			if ( password ) password.value = '';
+			if ( data.authenticated ) {
+				setTimeout( () => window.location.reload(), 2000 );
+				return true;
+			}
+			return false;
+		},
+	} );
+}
 
-	button.addEventListener( 'click', () => {
-		const shouldShow = input.type === 'password';
-		input.type = shouldShow ? 'text' : 'password';
-		button.setAttribute( 'aria-pressed', shouldShow ? 'true' : 'false' );
+function bindRegisterForm() {
+	bindAuthForm( {
+		formId: 'lihi-register-form',
+		statusId: 'lihi-register-status',
+		config: lihiSettings.register,
+		payload: ( form ) => ( {
+			email: form.querySelector( '#lihi_register_email' )?.value ?? '',
+			password: form.querySelector( '#lihi_register_password' )?.value ?? '',
+			create_account_consent: form.querySelector( '#lihi_register_consent' )?.checked ? '1' : '0',
+		} ),
+		validate: ( form ) => {
+			const email = form.querySelector( '#lihi_register_email' );
+			const password = form.querySelector( '#lihi_register_password' );
+			const consent = form.querySelector( '#lihi_register_consent' );
+			if ( ! email?.value.trim() || ! email.validity.valid ) {
+				return {
+					field: email,
+					message: lihiSettings.register?.emailRequired ||
+						'Please enter a valid email address.',
+				};
+			}
+			if ( ! password?.value.trim() || [ ...password.value ].length < 6 ) {
+				return {
+					field: password,
+					message: lihiSettings.register?.passwordRequired ||
+						'Please enter a password with at least 6 characters.',
+				};
+			}
+			if ( ! consent?.checked ) {
+				return {
+					field: consent,
+					message: lihiSettings.register?.consentRequired ||
+						'Please confirm that lihi may use this email and password to create an account.',
+				};
+			}
+			return null;
+		},
+		onSuccess: ( data, form ) => {
+			const password = form.querySelector( '#lihi_register_password' );
+			const consent = form.querySelector( '#lihi_register_consent' );
+			const loginEmail = document.getElementById( 'lihi_login_email' );
+			if ( password ) password.value = '';
+			if ( consent ) consent.checked = false;
+			if ( loginEmail && data.email ) {
+				loginEmail.value = data.email;
+			}
+			return false;
+		},
+	} );
+}
 
-		const label = shouldShow
-			? ( lihiSettings.hidePassword || 'Hide password' )
-			: ( lihiSettings.showPassword || 'Show password' );
-		button.setAttribute( 'aria-label', label );
-		button.title = label;
-		icon.classList.toggle( 'dashicons-visibility', ! shouldShow );
-		icon.classList.toggle( 'dashicons-hidden', shouldShow );
+function bindLogout() {
+	const button = document.getElementById( 'lihi-logout' );
+	const status = document.getElementById( 'lihi-account-status' );
+	if ( ! button || ! status || ! lihiSettings.logout ) return;
+
+	button.addEventListener( 'click', async () => {
+		clearStatus( status );
+		button.disabled = true;
+		button.setAttribute( 'aria-busy', 'true' );
+		let reloadPending = false;
+
+		try {
+			const data = await postAjax( {
+				action: lihiSettings.logout.action,
+				nonce: lihiSettings.logout.nonce,
+			} );
+			if ( data.success ) {
+				renderStatus( status, 'success', data.data?.message || fallbackMessage() );
+				reloadPending = true;
+				setTimeout( () => window.location.reload(), 2000 );
+			} else {
+				renderStatus( status, 'error', errorMessage( data ) );
+			}
+		} catch ( error ) {
+			renderStatus( status, 'error', exceptionMessage( error ) );
+		} finally {
+			if ( ! reloadPending ) {
+				button.disabled = false;
+				button.removeAttribute( 'aria-busy' );
+			}
+		}
+	} );
+}
+
+function bindPasswordToggles() {
+	document.querySelectorAll( '[data-lihi-password-toggle]' ).forEach( ( button ) => {
+		const inputId = button.getAttribute( 'aria-controls' );
+		const input = inputId ? document.getElementById( inputId ) : null;
+		const icon = button.querySelector( '.dashicons' );
+		if ( ! input || ! icon ) return;
+
+		button.addEventListener( 'click', () => {
+			const shouldShow = input.type === 'password';
+			input.type = shouldShow ? 'text' : 'password';
+			button.setAttribute( 'aria-pressed', shouldShow ? 'true' : 'false' );
+
+			const label = shouldShow
+				? ( lihiSettings.hidePassword || 'Hide password' )
+				: ( lihiSettings.showPassword || 'Show password' );
+			button.setAttribute( 'aria-label', label );
+			button.title = label;
+			icon.classList.toggle( 'dashicons-visibility', ! shouldShow );
+			icon.classList.toggle( 'dashicons-hidden', shouldShow );
+		} );
 	} );
 }
 
@@ -111,8 +180,13 @@ function exceptionMessage( error ) {
 	return error?.message || fallbackMessage();
 }
 
+function clearStatus( status ) {
+	status.classList.remove( 'notice', 'notice-error', 'notice-success', 'notice-warning', 'inline' );
+	status.replaceChildren();
+}
+
 function renderStatus( status, type, message, action = null ) {
-	status.className = 'notice notice-' + type + ' inline';
+	status.classList.add( 'notice', 'notice-' + type, 'inline' );
 	const p = document.createElement( 'p' );
 	p.textContent = message;
 	if ( action?.url && action?.label ) {
@@ -127,21 +201,50 @@ function renderStatus( status, type, message, action = null ) {
 	status.replaceChildren( p );
 }
 
+function clearFieldValidation( form, status ) {
+	form.querySelectorAll( '[aria-invalid="true"]' ).forEach( ( field ) => {
+		field.removeAttribute( 'aria-invalid' );
+		const describedBy = ( field.getAttribute( 'aria-describedby' ) || '' )
+			.split( /\s+/ )
+			.filter( ( id ) => id && id !== status.id );
+		if ( describedBy.length ) {
+			field.setAttribute( 'aria-describedby', describedBy.join( ' ' ) );
+		} else {
+			field.removeAttribute( 'aria-describedby' );
+		}
+	} );
+}
+
+function renderFieldError( status, error ) {
+	renderStatus( status, 'error', error.message );
+	if ( ! error.field ) return;
+
+	error.field.setAttribute( 'aria-invalid', 'true' );
+	const describedBy = new Set(
+		( error.field.getAttribute( 'aria-describedby' ) || '' )
+			.split( /\s+/ )
+			.filter( Boolean )
+	);
+	describedBy.add( status.id );
+	error.field.setAttribute( 'aria-describedby', [ ...describedBy ].join( ' ' ) );
+	error.field.focus();
+}
+
 async function postAjax( params ) {
 	const res = await fetch( lihiSettings.ajaxUrl, {
-		method:  'POST',
+		method: 'POST',
 		headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-		body:    new URLSearchParams( params ),
+		body: new URLSearchParams( params ),
 	} );
-	const text = await res.text();
+	const responseText = await res.text();
 
 	try {
-		const data = JSON.parse( text );
+		const data = JSON.parse( responseText );
 		if ( data && typeof data === 'object' && ! Array.isArray( data ) ) {
 			return data;
 		}
 	} catch {
-		// WordPress may return "0" or HTML for broken AJAX requests.
+		// WordPress may return "0" or HTML for a broken AJAX request.
 	}
 
 	throw new Error( fallbackMessage() );
@@ -196,8 +299,7 @@ function bindDashboardPassthrough() {
 
 	button.addEventListener( 'click', async () => {
 		const homeUrl = lihiSettings.homeUrl || '';
-		status.className = '';
-		status.replaceChildren();
+		clearStatus( status );
 
 		if ( ! homeUrl && ! lihiSettings.passthroughRedirectUrl ) {
 			renderStatus( status, 'error', fallbackMessage() );
@@ -205,6 +307,7 @@ function bindDashboardPassthrough() {
 		}
 
 		button.disabled = true;
+		button.setAttribute( 'aria-busy', 'true' );
 
 		try {
 			let proof = null;
@@ -216,8 +319,8 @@ function bindDashboardPassthrough() {
 			}
 
 			const params = {
-				action:    lihiSettings.dashboardAction,
-				nonce:     lihiSettings.dashboardNonce,
+				action: lihiSettings.dashboardAction,
+				nonce: lihiSettings.dashboardNonce,
 			};
 			if ( proof ) {
 				params.challenge = proof.challenge;
@@ -235,11 +338,7 @@ function bindDashboardPassthrough() {
 					throw new Error( errorMessage( data ) );
 				}
 
-				const link = document.createElement( 'a' );
-				link.href = fallbackUrl;
-				link.target = '_blank';
-				link.rel = 'noopener noreferrer';
-				link.click();
+				openExternalUrl( fallbackUrl );
 				return;
 			}
 
@@ -253,51 +352,66 @@ function bindDashboardPassthrough() {
 				throw new Error( errorMessage( data ) );
 			}
 
-			const link = document.createElement( 'a' );
-			link.href = buildPassthroughRedirectUrl( redirectUrl, passthroughNonce, proof.verifier );
-			link.target = '_blank';
-			link.rel = 'noopener noreferrer';
-			link.click();
+			openExternalUrl(
+				buildPassthroughRedirectUrl( redirectUrl, passthroughNonce, proof.verifier )
+			);
 		} catch ( error ) {
 			renderStatus( status, 'error', exceptionMessage( error ) );
 		} finally {
 			button.disabled = false;
+			button.removeAttribute( 'aria-busy' );
 		}
 	} );
 }
 
-/**
- * Wire a button that POSTs its field value to an admin-ajax endpoint and
- * renders a WP-style inline notice with the server message.
- */
-function bindSaver( { buttonId, statusId, action, nonce, payload, validate, successMessage, onSuccess } ) {
-	const button = document.getElementById( buttonId );
-	const status = document.getElementById( statusId );
-	if ( ! button || ! status ) return;
+function openExternalUrl( url ) {
+	const link = document.createElement( 'a' );
+	link.href = url;
+	link.target = '_blank';
+	link.rel = 'noopener noreferrer';
+	link.click();
+}
 
-	button.addEventListener( 'click', async () => {
-		status.className = '';
-		status.replaceChildren();
-		const validationMessage = validate?.() || '';
-		if ( validationMessage ) {
-			renderStatus( status, 'error', validationMessage );
+function bindAuthForm( { formId, statusId, config, payload, validate, onSuccess } ) {
+	const form = document.getElementById( formId );
+	const status = document.getElementById( statusId );
+	const button = form?.querySelector( 'button[type="submit"]' );
+	if ( ! form || ! status || ! button || ! config ) return;
+
+	form.addEventListener( 'submit', async ( event ) => {
+		event.preventDefault();
+		clearStatus( status );
+		clearFieldValidation( form, status );
+
+		const validationError = validate( form );
+		if ( validationError ) {
+			renderFieldError( status, validationError );
 			return;
 		}
 
 		button.disabled = true;
+		form.setAttribute( 'aria-busy', 'true' );
+		let reloadPending = false;
 		try {
-			const data = await postAjax( { action, nonce, ...payload() } );
+			const data = await postAjax( {
+				action: config.action,
+				nonce: config.nonce,
+				...payload( form ),
+			} );
 
 			if ( data.success ) {
-				renderStatus( status, 'success', successMessage( data.data ) );
-				onSuccess?.( data.data );
+				renderStatus( status, 'success', data.data?.message || fallbackMessage() );
+				reloadPending = onSuccess?.( data.data ?? {}, form ) === true;
 			} else {
 				renderStatus( status, 'error', errorMessage( data ), errorAction( data ) );
 			}
-		} catch ( e ) {
-			renderStatus( status, 'error', exceptionMessage( e ) );
+		} catch ( error ) {
+			renderStatus( status, 'error', exceptionMessage( error ) );
 		} finally {
-			button.disabled = false;
+			form.removeAttribute( 'aria-busy' );
+			if ( ! reloadPending ) {
+				button.disabled = false;
+			}
 		}
 	} );
 }

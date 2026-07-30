@@ -16,7 +16,6 @@ require_once plugin_dir_path( __FILE__ ) . 'includes/settings.php';
 require_once plugin_dir_path( __FILE__ ) . 'includes/client/lihi-exceptions.php';
 require_once plugin_dir_path( __FILE__ ) . 'includes/client/lihi-client-interface.php';
 require_once plugin_dir_path( __FILE__ ) . 'includes/client/lihi-client.php';
-require_once plugin_dir_path( __FILE__ ) . 'includes/store/lihi-uuid-store.php';
 require_once plugin_dir_path( __FILE__ ) . 'includes/store/lihi-token-store.php';
 require_once plugin_dir_path( __FILE__ ) . 'includes/service/lihi-service.php';
 

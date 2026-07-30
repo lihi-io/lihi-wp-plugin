@@ -5,6 +5,11 @@ namespace Lihi\ShortUrl\Tests;
 use Brain\Monkey;
 use Brain\Monkey\Functions;
 use Lihi\ShortUrl\Lihi_Client;
+use Lihi\ShortUrl\Lihi_Rate_Limit_Exception;
+use Lihi\ShortUrl\Lihi_Server_Exception;
+use Lihi\ShortUrl\Lihi_Token_Invalid_Exception;
+use Lihi\ShortUrl\Lihi_User_Invalid_Exception;
+use Lihi\ShortUrl\Lihi_Validation_Exception;
 use Mockery;
 use PHPUnit\Framework\TestCase;
 
@@ -14,7 +19,9 @@ class ClientTest extends TestCase
     {
         parent::setUp();
         Monkey\setUp();
+
         Functions\when('wp_json_encode')->alias('json_encode');
+        Functions\when('esc_html')->returnArg(1);
     }
 
     protected function tearDown(): void
@@ -24,310 +31,483 @@ class ClientTest extends TestCase
         parent::tearDown();
     }
 
-    // -------------------------------------------------------------------------
-    // Helpers
-    // -------------------------------------------------------------------------
-
-    private function makeClient(): Lihi_Client
+    private function client(): Lihi_Client
     {
-        return new Lihi_Client('https://app.lihidev.com', 'site-uuid');
+        return new Lihi_Client('https://app.lihi.com');
     }
 
     /**
-     * Stub a single HTTP call. Returns a callable that yields ['url' => ..., 'args' => ...].
+     * @param list<array{code: int, body: string}> $responses
+     * @param array<int, array{url: string, args: array}> $captured
      */
-    private function mockRequest(int $code = 200, string $body = '{}'): callable
+    private function mockRequests(array $responses, array &$captured): void
     {
-        $captured = ['url' => null, 'args' => null];
-        $fake     = ['__mock__' => true];
+        $index = 0;
 
         Functions\expect('wp_remote_request')
-            ->once()
-            ->andReturnUsing(function ($url, $args) use (&$captured, $fake) {
-                $captured['url']  = $url;
-                $captured['args'] = $args;
-                return $fake;
-            });
+            ->times(count($responses))
+            ->andReturnUsing(
+                function ($url, $args) use (
+                    &$captured,
+                    &$index,
+                    $responses
+                ) {
+                    $captured[] = [
+                        'url'  => $url,
+                        'args' => $args,
+                    ];
+                    $response = $responses[$index];
+                    $index++;
+                    return $response;
+                }
+            );
 
         Functions\when('is_wp_error')->justReturn(false);
-        Functions\when('wp_remote_retrieve_response_code')->justReturn($code);
-        Functions\when('wp_remote_retrieve_body')->justReturn($body);
+        Functions\when('wp_remote_retrieve_response_code')
+            ->alias(function ($response) {
+                return $response['code'];
+            });
+        Functions\when('wp_remote_retrieve_body')
+            ->alias(function ($response) {
+                return $response['body'];
+            });
+    }
 
-        return function () use (&$captured) {
-            return $captured;
+    /**
+     * @return array<string, array{string}>
+     */
+    public function protectedEndpointProvider(): array
+    {
+        return [
+            'profile'     => ['profile'],
+            'options'     => ['options'],
+            'passthrough' => ['passthrough'],
+            'find'        => ['find'],
+            'store'       => ['store'],
+        ];
+    }
+
+    /**
+     * @dataProvider protectedEndpointProvider
+     * @test
+     */
+    public function every_protected_endpoint_replaces_access_and_retries_once(
+        string $endpoint
+    ): void {
+        $captured = [];
+        $this->mockRequests([
+            [
+                'code' => 401,
+                'body' => '{"result":"failed","msg":"Token expired ,please login again"}',
+            ],
+            [
+                'code' => 200,
+                'body' => '{"result":true,"data":{}}',
+            ],
+        ], $captured);
+
+        $fallbackCalls = [];
+        $fallback      = function ($rejected) use (&$fallbackCalls) {
+            $fallbackCalls[] = $rejected;
+            return 'fresh-access';
         };
-    }
 
-    // -------------------------------------------------------------------------
-    // Individual methods — path, HTTP method, and payload
-    // -------------------------------------------------------------------------
+        $this->invokeProtected(
+            $endpoint,
+            'stale-access',
+            $fallback
+        );
 
-    /** @test */
-    public function get_short_link_sends_get_with_type_and_type_id(): void
-    {
-        $capture = $this->mockRequest(200, '{"result":true,"data":{"site":""}}');
-        $this->makeClient()->get_short_link('test-token', 'post', 42);
-        $url = $capture()['url'];
-        $this->assertStringContainsString('/api/wordpress/v1/site/find', $url);
-        $this->assertStringContainsString('type=post', $url);
-        $this->assertStringContainsString('type_id=42', $url);
-        $this->assertStringNotContainsString('per_page=', $url);
-    }
-
-    /** @test */
-    public function get_profile_sends_get_to_profile_path_with_bearer_token(): void
-    {
-        $capture = $this->mockRequest(200, '{"result":true,"data":{"user_role":"admin","end_date":null}}');
-        $this->makeClient()->get_profile('my-token');
-        $c = $capture();
-        $this->assertStringContainsString('/api/wordpress/v1/user/profile', $c['url']);
-        $this->assertSame('GET', $c['args']['method']);
-        $this->assertSame('Bearer my-token', $c['args']['headers']['Authorization']);
-    }
-
-    /** @test */
-    public function get_options_sends_get_to_options_path_with_bearer_token(): void
-    {
-        $capture = $this->mockRequest(200, '{"result":true,"data":{"domains":[],"utm_sources":[],"utm_mediums":[]}}');
-        $this->makeClient()->get_options('my-token');
-        $c = $capture();
-        $this->assertStringContainsString('/api/wordpress/v1/user/options', $c['url']);
-        $this->assertSame('GET', $c['args']['method']);
-        $this->assertSame('Bearer my-token', $c['args']['headers']['Authorization']);
+        $this->assertCount(2, $captured);
+        $this->assertSame($captured[0]['url'], $captured[1]['url']);
+        $this->assertSame(
+            $captured[0]['args']['method'],
+            $captured[1]['args']['method']
+        );
+        $this->assertSame(
+            $captured[0]['args']['body'] ?? null,
+            $captured[1]['args']['body'] ?? null
+        );
+        $this->assertSame(
+            'Bearer stale-access',
+            $captured[0]['args']['headers']['Authorization']
+        );
+        $this->assertSame(
+            'Bearer fresh-access',
+            $captured[1]['args']['headers']['Authorization']
+        );
+        $this->assertSame(['stale-access'], $fallbackCalls);
     }
 
     /** @test */
-    public function get_options_throws_validation_exception_on_400(): void
+    public function second_unauthorized_response_propagates_without_another_fallback(): void
     {
-        $this->mockRequest(400, '{"result":false,"msg":{"options":["Could not load options."]}}');
-        $this->expectException(\Lihi\ShortUrl\Lihi_Validation_Exception::class);
-        $this->makeClient()->get_options('my-token');
+        $captured = [];
+        $this->mockRequests([
+            [
+                'code' => 401,
+                'body' => '{"result":"failed","msg":"Token expired ,please login again"}',
+            ],
+            [
+                'code' => 401,
+                'body' => '{"result":"failed","msg":"Token expired ,please login again"}',
+            ],
+        ], $captured);
+
+        $calls = 0;
+        $fallback = function () use (&$calls) {
+            $calls++;
+            return 'fresh-access';
+        };
+
+        try {
+            $this->client()->get_profile('stale-access', $fallback);
+            $this->fail('Expected token-invalid exception.');
+        } catch (Lihi_Token_Invalid_Exception $error) {
+            $this->assertSame(1, $calls);
+            $this->assertCount(2, $captured);
+        }
     }
 
     /** @test */
-    public function get_options_throws_server_exception_on_result_false(): void
+    public function empty_fallback_token_does_not_send_a_second_request(): void
     {
-        $this->mockRequest(200, '{"result":false,"msg":"options unavailable"}');
-        $this->expectException(\Lihi\ShortUrl\Lihi_Server_Exception::class);
-        $this->expectExceptionMessage('options unavailable');
-        $this->makeClient()->get_options('my-token');
+        $captured = [];
+        $this->mockRequests([
+            [
+                'code' => 401,
+                'body' => '{"result":"failed","msg":"Token expired ,please login again"}',
+            ],
+        ], $captured);
+
+        $this->expectException(Lihi_Token_Invalid_Exception::class);
+
+        try {
+            $this->client()->get_profile(
+                'stale-access',
+                function () {
+                    return '';
+                }
+            );
+        } finally {
+            $this->assertCount(1, $captured);
+        }
+    }
+
+    /**
+     * @return array<string, array{int, string, string}>
+     */
+    public function nonRefreshableErrorProvider(): array
+    {
+        return [
+            'validation' => [
+                400,
+                '{"result":false,"msg":"bad request"}',
+                Lihi_Validation_Exception::class,
+            ],
+            'invalid user' => [
+                403,
+                '{"result":"failed","msg":"User Invalid"}',
+                Lihi_User_Invalid_Exception::class,
+            ],
+            'rate limit' => [
+                429,
+                '{"result":false,"msg":"Too Many Attempts."}',
+                Lihi_Rate_Limit_Exception::class,
+            ],
+            'server error' => [
+                500,
+                '{"result":false,"msg":"upstream unavailable"}',
+                Lihi_Server_Exception::class,
+            ],
+        ];
+    }
+
+    /**
+     * @dataProvider nonRefreshableErrorProvider
+     * @test
+     */
+    public function non_401_errors_never_invoke_access_fallback(
+        int $code,
+        string $body,
+        string $exceptionClass
+    ): void {
+        $captured = [];
+        $this->mockRequests([
+            ['code' => $code, 'body' => $body],
+        ], $captured);
+
+        $fallbackCalls = 0;
+        $fallback = function () use (&$fallbackCalls) {
+            $fallbackCalls++;
+            return 'fresh-access';
+        };
+
+        try {
+            $this->client()->get_options('access', $fallback);
+            $this->fail('Expected ' . $exceptionClass);
+        } catch (\Exception $error) {
+            $this->assertInstanceOf($exceptionClass, $error);
+            $this->assertSame(0, $fallbackCalls);
+            $this->assertCount(1, $captured);
+        }
     }
 
     /** @test */
-    public function create_passthrough_nonce_posts_challenge_and_target_with_bearer_token(): void
+    public function html_upgrade_page_is_server_error_not_token_invalid(): void
     {
-        $capture = $this->mockRequest(200, '{"result":true,"msg":"","data":{"nonce":"nonce-token"}}');
+        $captured = [];
+        $this->mockRequests([
+            [
+                'code' => 500,
+                'body' => '<html><head><title>網站升級中...</title></head></html>',
+            ],
+        ], $captured);
+
+        $fallbackCalls = 0;
+
+        try {
+            $this->client()->get_profile(
+                'access',
+                function () use (&$fallbackCalls) {
+                    $fallbackCalls++;
+                    return 'fresh-access';
+                }
+            );
+            $this->fail('Expected server exception.');
+        } catch (Lihi_Token_Invalid_Exception $error) {
+            $this->fail('HTML outages must not rotate refresh tokens.');
+        } catch (Lihi_Server_Exception $error) {
+            $this->assertSame(0, $fallbackCalls);
+        }
+    }
+
+    /** @test */
+    public function malformed_401_is_fail_closed_without_access_fallback(): void
+    {
+        $captured = [];
+        $this->mockRequests([
+            [
+                'code' => 401,
+                'body' => '<html><body>Unauthorized</body></html>',
+            ],
+        ], $captured);
+
+        $fallbackCalls = 0;
+
+        try {
+            $this->client()->get_profile(
+                'stale-access',
+                function () use (&$fallbackCalls) {
+                    $fallbackCalls++;
+                    return 'fresh-access';
+                }
+            );
+            $this->fail('Expected malformed HTTP response to fail closed.');
+        } catch (Lihi_Token_Invalid_Exception $error) {
+            $this->fail('Malformed responses must not rotate refresh tokens.');
+        } catch (Lihi_Server_Exception $error) {
+            $this->assertSame(0, $fallbackCalls);
+            $this->assertCount(1, $captured);
+        }
+    }
+
+    /** @test */
+    public function empty_500_response_is_fail_closed(): void
+    {
+        $captured = [];
+        $this->mockRequests([
+            [
+                'code' => 500,
+                'body' => '',
+            ],
+        ], $captured);
+
+        $fallbackCalls = 0;
+
+        try {
+            $this->client()->get_short_link(
+                'access',
+                'post:example.com',
+                42,
+                function () use (&$fallbackCalls) {
+                    $fallbackCalls++;
+                    return 'fresh-access';
+                }
+            );
+            $this->fail('Empty HTTP 500 must fail closed.');
+        } catch (Lihi_Server_Exception $error) {
+            $this->assertSame(0, $fallbackCalls);
+            $this->assertCount(1, $captured);
+        }
+    }
+
+    /** @test */
+    public function find_uses_query_string_and_store_uses_json_body(): void
+    {
+        $captured = [];
+        $this->mockRequests([
+            [
+                'code' => 200,
+                'body' => '{"result":true,"data":{"site":""}}',
+            ],
+            [
+                'code' => 200,
+                'body' => '{"result":true,"data":{"short_url":"https://lihi.io/a"}}',
+            ],
+        ], $captured);
+
+        $never = function () {
+            $this->fail('Fallback should not run.');
+        };
+
+        $this->client()->get_short_link(
+            'access',
+            'post:example.com',
+            42,
+            $never
+        );
+        $this->client()->create_site(
+            'access',
+            [
+                'domain'  => 'lihi.io',
+                'urls'    => ['https://example.com/post'],
+                'type'    => 'post:example.com',
+                'type_id' => '42',
+            ],
+            $never
+        );
+
+        $this->assertStringContainsString(
+            '/site/find?type=post%3Aexample.com&type_id=42',
+            $captured[0]['url']
+        );
+        $this->assertArrayNotHasKey('body', $captured[0]['args']);
+
+        $stored = json_decode($captured[1]['args']['body'], true);
+        $this->assertSame(
+            ['https://example.com/post'],
+            $stored['urls']
+        );
+        $this->assertStringEndsWith('/site/store', $captured[1]['url']);
+    }
+
+    /** @test */
+    public function passthrough_posts_target_and_challenge(): void
+    {
+        $captured = [];
+        $this->mockRequests([
+            [
+                'code' => 200,
+                'body' => '{"result":true,"data":{"nonce":"nonce-token"}}',
+            ],
+        ], $captured);
+
         $challenge = str_repeat('A', 43);
+        $result = $this->client()->create_passthrough_nonce(
+            'access',
+            '/myDomain',
+            $challenge,
+            function () {
+                return 'unused';
+            }
+        );
 
-        $result = $this->makeClient()->create_passthrough_nonce('my-token', 'https://example.com/path?foo=bar', $challenge);
-
-        $c    = $capture();
-        $body = json_decode($c['args']['body'] ?? '{}', true);
-        $this->assertStringContainsString('/api/wordpress/v1/passthrough/nonce', $c['url']);
-        $this->assertSame('POST', $c['args']['method']);
-        $this->assertSame('Bearer my-token', $c['args']['headers']['Authorization']);
+        $body = json_decode($captured[0]['args']['body'], true);
+        $this->assertSame('/myDomain', $body['target']);
         $this->assertSame($challenge, $body['challenge']);
-        $this->assertArrayNotHasKey('ip', $body);
-        $this->assertSame('https://example.com/path?foo=bar', $body['target']);
         $this->assertSame('nonce-token', $result['data']['nonce']);
     }
 
     /** @test */
-    public function create_passthrough_nonce_throws_validation_exception_on_400(): void
+    public function html_404_is_a_server_failure_not_a_missing_short_link(): void
     {
-        $this->mockRequest(400, '{"result":false,"msg":{"target":["The target may not be greater than 2048 characters."]}}');
+        $captured = [];
+        $this->mockRequests([
+            [
+                'code' => 404,
+                'body' => '<html><head><title>Page Not Found</title></head></html>',
+            ],
+        ], $captured);
 
-        $this->expectException(\Lihi\ShortUrl\Lihi_Validation_Exception::class);
-        $this->makeClient()->create_passthrough_nonce('my-token', str_repeat('a', 2049), str_repeat('A', 43));
-    }
-
-    // -------------------------------------------------------------------------
-    // request()
-    // -------------------------------------------------------------------------
-
-    /** @test */
-    public function get_request_appends_data_as_query_string(): void
-    {
-        $capture = $this->mockRequest();
-        $this->makeClient()->get_short_link('test-token', 'products', '10');
-        $c = $capture();
-        $this->assertStringContainsString('/api/wordpress/v1/site/find', $c['url']);
-        $this->assertStringContainsString('type=products', $c['url']);
-        $this->assertStringContainsString('type_id=10', $c['url']);
-        $this->assertArrayNotHasKey('body', $c['args']);
+        $this->expectException(Lihi_Server_Exception::class);
+        $this->client()->get_profile(
+            'access',
+            function () {
+                return 'unused';
+            }
+        );
     }
 
     /** @test */
-    public function post_request_encodes_data_as_json_body(): void
+    public function empty_404_is_fail_closed_without_access_fallback(): void
     {
-        $capture = $this->mockRequest();
-        $this->makeClient()->create_site('test-token', [
-            'urls'    => ['https://example.com'],
-            'alias'   => 'test',
-            'domain'  => '',
-            'tags'    => '',
-            'type'    => 'post',
-            'type_id' => 1,
-        ]);
-        $c    = $capture();
-        $body = json_decode($c['args']['body'] ?? '{}', true);
-        $this->assertStringContainsString('/api/wordpress/v1/site/store', $c['url']);
-        $this->assertSame(['https://example.com'], $body['urls']);
-        $this->assertStringNotContainsString('?', $c['url']);
+        $captured = [];
+        $this->mockRequests([
+            [
+                'code' => 404,
+                'body' => '',
+            ],
+        ], $captured);
+
+        $fallbackCalls = 0;
+
+        try {
+            $this->client()->get_short_link(
+                'access',
+                'post:example.com',
+                42,
+                function () use (&$fallbackCalls) {
+                    $fallbackCalls++;
+                    return 'fresh-access';
+                }
+            );
+            $this->fail('Empty HTTP 404 must fail closed.');
+        } catch (Lihi_Server_Exception $error) {
+            $this->assertSame(0, $fallbackCalls);
+            $this->assertCount(1, $captured);
+        }
     }
 
-    /** @test */
-    public function request_includes_authorization_header_when_token_provided(): void
-    {
-        $capture = $this->mockRequest();
-        $this->makeClient()->get_short_link('my-token', 'post', 42);
-        $c = $capture();
-        $this->assertSame('Bearer my-token', $c['args']['headers']['Authorization']);
-    }
+    /**
+     * @return array
+     */
+    private function invokeProtected(
+        string $endpoint,
+        string $access,
+        callable $fallback
+    ): array {
+        switch ($endpoint) {
+            case 'profile':
+                return $this->client()->get_profile($access, $fallback);
+            case 'options':
+                return $this->client()->get_options($access, $fallback);
+            case 'passthrough':
+                return $this->client()->create_passthrough_nonce(
+                    $access,
+                    '/myDomain',
+                    str_repeat('A', 43),
+                    $fallback
+                );
+            case 'find':
+                return $this->client()->get_short_link(
+                    $access,
+                    'post:example.com',
+                    42,
+                    $fallback
+                );
+            case 'store':
+                return $this->client()->create_site(
+                    $access,
+                    [
+                        'domain' => 'lihi.io',
+                        'urls'   => ['https://example.com'],
+                        'type'   => 'post:example.com',
+                    ],
+                    $fallback
+                );
+        }
 
-    /** @test */
-    public function request_returns_empty_array_on_204(): void
-    {
-        $this->mockRequest(204, '');
-        $result = $this->makeClient()->get_short_link('test-token', 'post', 42);
-        $this->assertSame([], $result);
-    }
-
-    /** @test */
-    public function request_returns_empty_array_on_empty_body(): void
-    {
-        $this->mockRequest(200, '');
-        $result = $this->makeClient()->get_short_link('test-token', 'post', 42);
-        $this->assertSame([], $result);
-    }
-
-    /** @test */
-    public function request_throws_not_found_exception_on_404_html(): void
-    {
-        $html = '<html><head><title>Page Not Found</title></head><body></body></html>';
-        $this->mockRequest(404, $html);
-        $this->expectException(\Lihi\ShortUrl\Lihi_Not_Found_Exception::class);
-        $this->expectExceptionMessageMatches('/404.*Page Not Found/');
-        $this->makeClient()->get_short_link('test-token', 'post', 42);
-    }
-
-    /** @test */
-    public function request_throws_token_invalid_exception_on_upgrade_title(): void
-    {
-        $html = '<html><head><title>網站升級中...</title></head><body></body></html>';
-        $this->mockRequest(500, $html);
-        $this->expectException(\Lihi\ShortUrl\Lihi_Token_Invalid_Exception::class);
-        $this->expectExceptionMessageMatches('/500.*網站升級中/');
-        $this->makeClient()->get_short_link('test-token', 'post', 42);
-    }
-
-    /** @test */
-    public function token_invalid_exception_is_a_server_exception(): void
-    {
-        $html = '<html><head><title>網站升級中...</title></head><body></body></html>';
-        $this->mockRequest(500, $html);
-        $this->expectException(\Lihi\ShortUrl\Lihi_Server_Exception::class);
-        $this->makeClient()->get_short_link('test-token', 'post', 42);
-    }
-
-    /** @test */
-    public function authenticated_json_404_user_not_found_throws_user_invalid_exception(): void
-    {
-        $this->mockRequest(404, '{"result":"failed","msg":"user_not_found ,please login again"}');
-        $this->expectException(\Lihi\ShortUrl\Lihi_User_Invalid_Exception::class);
-        $this->expectExceptionMessage('user_not_found');
-        $this->makeClient()->get_profile('test-token');
-    }
-
-    /** @test */
-    public function authenticated_json_500_login_again_throws_token_invalid_exception(): void
-    {
-        $this->mockRequest(500, '{"result":"failed","msg":"Token expired ,please login again"}');
-        $this->expectException(\Lihi\ShortUrl\Lihi_Token_Invalid_Exception::class);
-        $this->expectExceptionMessage('please login again');
-        $this->makeClient()->get_short_link('test-token', 'post', 42);
-    }
-
-    /** @test */
-    public function authenticated_json_500_token_invalid_message_throws_token_invalid_exception(): void
-    {
-        $this->mockRequest(500, '{"result":"failed","msg":"Token invalid ,please login again"}');
-        $this->expectException(\Lihi\ShortUrl\Lihi_Token_Invalid_Exception::class);
-        $this->expectExceptionMessage('Token invalid');
-        $this->makeClient()->get_short_link('test-token', 'post', 42);
-    }
-
-    /** @test */
-    public function authenticated_json_500_something_wrong_login_again_throws_token_invalid_exception(): void
-    {
-        $this->mockRequest(500, '{"result":"failed","msg":"Something wrong ,please login again"}');
-        $this->expectException(\Lihi\ShortUrl\Lihi_Token_Invalid_Exception::class);
-        $this->expectExceptionMessage('Something wrong');
-        $this->makeClient()->get_short_link('test-token', 'post', 42);
-    }
-
-    /** @test */
-    public function request_throws_server_exception_on_5xx_html_unknown_title(): void
-    {
-        $html = '<html><head><title>Internal Server Error</title></head><body></body></html>';
-        $this->mockRequest(500, $html);
-        $this->expectException(\Lihi\ShortUrl\Lihi_Server_Exception::class);
-        $this->expectExceptionMessageMatches('/500.*Internal Server Error/');
-        $this->makeClient()->get_short_link('test-token', 'post', 42);
-    }
-
-    /** @test */
-    public function request_throws_server_exception_on_non_json_without_title(): void
-    {
-        $this->mockRequest(500, 'not-json');
-        $this->expectException(\Lihi\ShortUrl\Lihi_Server_Exception::class);
-        $this->makeClient()->get_short_link('test-token', 'post', 42);
-    }
-
-    /** @test */
-    public function authenticated_json_403_user_invalid_throws_user_invalid_exception(): void
-    {
-        $this->mockRequest(403, '{"result":"failed","msg":"User Invalid"}');
-        $this->expectException(\Lihi\ShortUrl\Lihi_User_Invalid_Exception::class);
-        $this->makeClient()->get_profile('test-token');
-    }
-
-    /** @test */
-    public function create_site_throws_validation_exception_on_400(): void
-    {
-        $this->mockRequest(400, '{"result":false,"msg":{"domain":["The domain field is required."]}}');
-        $this->expectException(\Lihi\ShortUrl\Lihi_Validation_Exception::class);
-        $this->makeClient()->create_site('token', []);
-    }
-
-    /** @test */
-    public function get_short_link_throws_validation_exception_on_400(): void
-    {
-        $this->mockRequest(400, '{"result":false,"msg":{"type":["The type field is required."]}}');
-        $this->expectException(\Lihi\ShortUrl\Lihi_Validation_Exception::class);
-        $this->makeClient()->get_short_link('token', 'post', 42);
-    }
-
-    /** @test */
-    public function get_short_link_throws_server_exception_on_5xx_json_failure(): void
-    {
-        $this->mockRequest(500, '{"result":false,"msg":"upstream unavailable"}');
-        $this->expectException(\Lihi\ShortUrl\Lihi_Server_Exception::class);
-        $this->expectExceptionMessage('upstream unavailable');
-        $this->makeClient()->get_short_link('token', 'post', 42);
-    }
-
-    /** @test */
-    public function request_throws_server_exception_on_wp_error(): void
-    {
-        $wpError = Mockery::mock('WP_Error');
-        $wpError->shouldReceive('get_error_message')->andReturn('cURL error: connection timed out');
-
-        Functions\expect('wp_remote_request')->once()->andReturn($wpError);
-        Functions\when('is_wp_error')->justReturn(true);
-
-        $this->expectException(\Lihi\ShortUrl\Lihi_Server_Exception::class);
-        $this->expectExceptionMessage('cURL error: connection timed out');
-        $this->makeClient()->get_short_link('test-token', 'post', 42);
+        throw new \InvalidArgumentException('Unknown endpoint.');
     }
 }
