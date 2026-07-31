@@ -5,6 +5,7 @@ namespace Lihi\ShortUrl\Tests;
 use Brain\Monkey;
 use Brain\Monkey\Functions;
 use Lihi\ShortUrl\Lihi_Client;
+use Lihi\ShortUrl\Lihi_Need_Upgrade_Exception;
 use Lihi\ShortUrl\Lihi_Rate_Limit_Exception;
 use Lihi\ShortUrl\Lihi_Server_Exception;
 use Lihi\ShortUrl\Lihi_Token_Invalid_Exception;
@@ -79,11 +80,13 @@ class ClientTest extends TestCase
     public function protectedEndpointProvider(): array
     {
         return [
-            'profile'     => ['profile'],
-            'options'     => ['options'],
-            'passthrough' => ['passthrough'],
-            'find'        => ['find'],
-            'store'       => ['store'],
+            'profile'       => ['profile'],
+            'options'       => ['options'],
+            'group options' => ['group_options'],
+            'switch group'  => ['switch_group'],
+            'passthrough'   => ['passthrough'],
+            'find'          => ['find'],
+            'store'         => ['store'],
         ];
     }
 
@@ -218,6 +221,16 @@ class ClientTest extends TestCase
             'server error' => [
                 500,
                 '{"result":false,"msg":"upstream unavailable"}',
+                Lihi_Server_Exception::class,
+            ],
+            'server error with user-invalid marker' => [
+                500,
+                '{"result":false,"msg":"User Invalid"}',
+                Lihi_Server_Exception::class,
+            ],
+            'server error with user-not-found marker' => [
+                500,
+                '{"result":false,"msg":"user_not_found ,please login again"}',
                 Lihi_Server_Exception::class,
             ],
         ];
@@ -393,6 +406,76 @@ class ClientTest extends TestCase
     }
 
     /** @test */
+    public function site_store_need_upgrade_uses_dedicated_exception(): void
+    {
+        $captured = [];
+        $this->mockRequests([
+            [
+                'code' => 400,
+                'body' => '{"result":false,"msg":"need_upgrade"}',
+            ],
+        ], $captured);
+
+        $fallbackCalls = 0;
+
+        try {
+            $this->client()->create_site(
+                'access',
+                [
+                    'domain' => 'lihi.io',
+                    'urls'   => ['https://example.com/post'],
+                    'type'   => 'post:example.com',
+                    'type_id' => '42',
+                ],
+                function () use (&$fallbackCalls) {
+                    $fallbackCalls++;
+                    return 'fresh-access';
+                }
+            );
+            $this->fail('Expected need-upgrade exception.');
+        } catch (Lihi_Need_Upgrade_Exception $error) {
+            $this->assertSame('need_upgrade', $error->getMessage());
+            $this->assertSame(0, $fallbackCalls);
+            $this->assertCount(1, $captured);
+        }
+    }
+
+    /** @test */
+    public function site_store_failure_uses_validation_exception(): void
+    {
+        $captured = [];
+        $this->mockRequests([
+            [
+                'code' => 400,
+                'body' => '{"result":false,"msg":"site_create_fail"}',
+            ],
+        ], $captured);
+
+        try {
+            $this->client()->create_site(
+                'access',
+                [
+                    'domain' => 'lihi.io',
+                    'urls'   => ['https://example.com/post'],
+                    'type'   => 'post:example.com',
+                    'type_id' => '42',
+                ],
+                function () {
+                    $this->fail('Fallback should not run.');
+                }
+            );
+            $this->fail('Expected validation exception.');
+        } catch (Lihi_Validation_Exception $error) {
+            $this->assertSame(
+                Lihi_Validation_Exception::class,
+                get_class($error)
+            );
+            $this->assertSame('site_create_fail', $error->getMessage());
+            $this->assertCount(1, $captured);
+        }
+    }
+
+    /** @test */
     public function passthrough_posts_target_and_challenge(): void
     {
         $captured = [];
@@ -417,6 +500,69 @@ class ClientTest extends TestCase
         $this->assertSame('/myDomain', $body['target']);
         $this->assertSame($challenge, $body['challenge']);
         $this->assertSame('nonce-token', $result['data']['nonce']);
+    }
+
+    /** @test */
+    public function work_group_endpoints_use_the_expected_paths_and_nullable_json_id(): void
+    {
+        $captured = [];
+        $this->mockRequests([
+            [
+                'code' => 200,
+                'body' => '{"result":true,"data":{"groups":[{"id":null,"name":"My Group"}],"group_id":null}}',
+            ],
+            [
+                'code' => 200,
+                'body' => '{"result":true,"data":{"group_id":null}}',
+            ],
+        ], $captured);
+
+        $never = function () {
+            $this->fail('Fallback should not run.');
+        };
+
+        $this->client()->get_group_options('access', $never);
+        $this->client()->switch_group('access', null, $never);
+
+        $this->assertStringEndsWith(
+            '/api/wordpress/v1/user/group-options',
+            $captured[0]['url']
+        );
+        $this->assertSame('GET', $captured[0]['args']['method']);
+        $this->assertArrayNotHasKey('body', $captured[0]['args']);
+        $this->assertStringEndsWith(
+            '/api/wordpress/v1/user/switch-group',
+            $captured[1]['url']
+        );
+        $this->assertSame('POST', $captured[1]['args']['method']);
+        $this->assertSame(
+            ['group_id' => null],
+            json_decode($captured[1]['args']['body'], true)
+        );
+    }
+
+    /** @test */
+    public function domain_options_uses_the_renamed_endpoint(): void
+    {
+        $captured = [];
+        $this->mockRequests([
+            [
+                'code' => 200,
+                'body' => '{"result":true,"data":{"domains":[],"utm_sources":[],"utm_mediums":[]}}',
+            ],
+        ], $captured);
+
+        $this->client()->get_options(
+            'access',
+            function () {
+                $this->fail('Fallback should not run.');
+            }
+        );
+
+        $this->assertStringEndsWith(
+            '/api/wordpress/v1/user/domain-options',
+            $captured[0]['url']
+        );
     }
 
     /** @test */
@@ -482,6 +628,14 @@ class ClientTest extends TestCase
                 return $this->client()->get_profile($access, $fallback);
             case 'options':
                 return $this->client()->get_options($access, $fallback);
+            case 'group_options':
+                return $this->client()->get_group_options($access, $fallback);
+            case 'switch_group':
+                return $this->client()->switch_group(
+                    $access,
+                    42,
+                    $fallback
+                );
             case 'passthrough':
                 return $this->client()->create_passthrough_nonce(
                     $access,

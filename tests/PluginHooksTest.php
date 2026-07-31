@@ -63,6 +63,16 @@ class PluginHooksTest extends \WP_UnitTestCase
         $this->assertNotFalse(has_action('wp_ajax_lihi_logout'));
     }
 
+    public function test_wp_ajax_lihi_group_options_handler_is_registered(): void
+    {
+        $this->assertNotFalse(has_action('wp_ajax_lihi_group_options'));
+    }
+
+    public function test_wp_ajax_lihi_switch_group_handler_is_registered(): void
+    {
+        $this->assertNotFalse(has_action('wp_ajax_lihi_switch_group'));
+    }
+
     public function test_removed_update_email_ajax_handler_is_not_registered(): void
     {
         $this->assertFalse(has_action('wp_ajax_lihi_update_email'));

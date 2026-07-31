@@ -1,10 +1,72 @@
 document.addEventListener( 'DOMContentLoaded', () => {
+	bindAuthTabs();
 	bindPasswordToggles();
 	bindLoginForm();
 	bindRegisterForm();
 	bindLogout();
+	bindWorkGroupDialog();
 	bindDashboardPassthrough();
 } );
+
+function bindAuthTabs() {
+	const tabs = [ ...document.querySelectorAll( '[data-lihi-auth-tab]' ) ];
+	if ( tabs.length !== 2 ) return;
+
+	tabs.forEach( ( tab, index ) => {
+		tab.addEventListener( 'click', ( event ) => {
+			event.preventDefault();
+			activateAuthTab( tab.dataset.lihiAuthTab, true );
+			updateAuthTabUrl( tab.href );
+		} );
+
+		tab.addEventListener( 'keydown', ( event ) => {
+			let nextIndex = null;
+			if ( event.key === 'ArrowRight' || event.key === 'ArrowDown' ) {
+				nextIndex = ( index + 1 ) % tabs.length;
+			} else if ( event.key === 'ArrowLeft' || event.key === 'ArrowUp' ) {
+				nextIndex = ( index - 1 + tabs.length ) % tabs.length;
+			} else if ( event.key === 'Home' ) {
+				nextIndex = 0;
+			} else if ( event.key === 'End' ) {
+				nextIndex = tabs.length - 1;
+			}
+
+			if ( nextIndex === null ) return;
+			event.preventDefault();
+			const nextTab = tabs[ nextIndex ];
+			activateAuthTab( nextTab.dataset.lihiAuthTab, true );
+			updateAuthTabUrl( nextTab.href );
+		} );
+	} );
+}
+
+function activateAuthTab( tabName, shouldFocus = false ) {
+	if ( tabName !== 'login' && tabName !== 'register' ) return;
+
+	document.querySelectorAll( '[data-lihi-auth-tab]' ).forEach( ( tab ) => {
+		const selected = tab.dataset.lihiAuthTab === tabName;
+		tab.classList.toggle( 'is-active', selected );
+		tab.setAttribute( 'aria-selected', selected ? 'true' : 'false' );
+		tab.tabIndex = selected ? 0 : -1;
+		if ( selected && shouldFocus ) tab.focus();
+	} );
+
+	[ 'login', 'register' ].forEach( ( name ) => {
+		const panel = document.getElementById( `lihi-${ name }-panel` );
+		if ( panel ) panel.hidden = name !== tabName;
+	} );
+}
+
+function updateAuthTabUrl( href ) {
+	if ( ! window.history?.replaceState || ! href ) return;
+
+	try {
+		const url = new URL( href, window.location.href );
+		window.history.replaceState( null, '', url.toString() );
+	} catch {
+		// Tab switching still works when URL parsing is unavailable.
+	}
+}
 
 function bindLoginForm() {
 	bindAuthForm( {
@@ -46,6 +108,10 @@ function bindLoginForm() {
 	} );
 }
 
+function registerPasswordHasMinimumLength( password ) {
+	return [ ...password ].length >= 6;
+}
+
 function bindRegisterForm() {
 	bindAuthForm( {
 		formId: 'lihi-register-form',
@@ -67,7 +133,7 @@ function bindRegisterForm() {
 						'Please enter a valid email address.',
 				};
 			}
-			if ( ! password?.value.trim() || [ ...password.value ].length < 6 ) {
+			if ( ! password || ! registerPasswordHasMinimumLength( password.value ) ) {
 				return {
 					field: password,
 					message: lihiSettings.register?.passwordRequired ||
@@ -92,8 +158,213 @@ function bindRegisterForm() {
 			if ( loginEmail && data.email ) {
 				loginEmail.value = data.email;
 			}
+			activateAuthTab( 'login', true );
+			updateAuthTabUrl( document.getElementById( 'lihi-login-tab' )?.href );
 			return false;
 		},
+	} );
+}
+
+function bindWorkGroupDialog() {
+	const trigger = document.getElementById( 'lihi-switch-work-group' );
+	const root = document.getElementById( 'lihi-work-group-modal' );
+	const dialog = root?.querySelector( '[role="dialog"]' );
+	const form = document.getElementById( 'lihi-work-group-form' );
+	const select = document.getElementById( 'lihi-work-group-select' );
+	const submit = document.getElementById( 'lihi-work-group-submit' );
+	const status = document.getElementById( 'lihi-work-group-status' );
+	const accountStatus = document.getElementById( 'lihi-account-status' );
+	const currentLabel = document.getElementById( 'lihi-current-work-group' );
+	const config = lihiSettings.workGroup;
+	if (
+		! trigger ||
+		! root ||
+		! dialog ||
+		! form ||
+		! select ||
+		! submit ||
+		! status ||
+		! accountStatus ||
+		! currentLabel ||
+		! config
+	) return;
+
+	let currentValue = '';
+	let previousFocus = trigger;
+	let switching = false;
+
+	const closeDialog = () => {
+		if ( switching ) return;
+		root.hidden = true;
+		document.body.classList.remove( 'lihi-work-group-modal-open' );
+		previousFocus?.focus();
+	};
+
+	const updateSubmitState = () => {
+		submit.disabled = select.disabled || select.value === currentValue || switching;
+	};
+
+	const renderLoadingOption = () => {
+		const option = document.createElement( 'option' );
+		option.value = '';
+		option.textContent = config.loading || 'Loading work groups…';
+		option.selected = true;
+		select.replaceChildren( option );
+		select.disabled = true;
+		updateSubmitState();
+	};
+
+	const renderOptions = ( groups, groupId ) => {
+		if ( ! Array.isArray( groups ) || groups.length === 0 ) {
+			throw new Error( config.noOptions || 'No work groups are available.' );
+		}
+
+		const options = groups.map( ( group ) => {
+			const id = group?.id;
+			if ( id !== null && ( ! Number.isInteger( id ) || id <= 0 ) ) {
+				throw new Error( config.loadFailed || 'Could not load work groups.' );
+			}
+
+			const option = document.createElement( 'option' );
+			option.value = id === null ? '' : String( id );
+			if ( id === null ) {
+				option.textContent = config.personalLabel || 'My Work Group';
+			} else {
+				const name = typeof group.name === 'string' ? group.name.trim() : '';
+				option.textContent = name ||
+					`${ config.unnamedLabel || 'Unnamed Work Group' } #${ id }`;
+			}
+			return option;
+		} );
+
+		currentValue = groupId === null ? '' : String( groupId );
+		if ( ! options.some( ( option ) => option.value === currentValue ) ) {
+			throw new Error( config.loadFailed || 'Could not load work groups.' );
+		}
+
+		select.replaceChildren( ...options );
+		select.value = currentValue;
+		select.disabled = false;
+		updateSubmitState();
+		select.focus();
+	};
+
+	const openDialog = async () => {
+		previousFocus = document.activeElement || trigger;
+		root.hidden = false;
+		document.body.classList.add( 'lihi-work-group-modal-open' );
+		clearStatus( status );
+		renderLoadingOption();
+		dialog.focus();
+
+		try {
+			const data = await postAjax( {
+				action: config.optionsAction,
+				nonce: config.optionsNonce,
+			} );
+			if ( ! data.success ) {
+				throw new Error( errorMessage( data ) );
+			}
+
+			renderOptions( data.data?.groups, data.data?.group_id ?? null );
+		} catch ( error ) {
+			select.disabled = true;
+			updateSubmitState();
+			renderStatus( status, 'error', exceptionMessage( error ) );
+		}
+	};
+
+	trigger.addEventListener( 'click', openDialog );
+	select.addEventListener( 'change', updateSubmitState );
+
+	root.querySelectorAll( '[data-lihi-work-group-close]' ).forEach( ( close ) => {
+		close.addEventListener( 'click', closeDialog );
+	} );
+
+	root.addEventListener( 'keydown', ( event ) => {
+		if ( event.key === 'Escape' ) {
+			event.preventDefault();
+			closeDialog();
+			return;
+		}
+		if ( event.key !== 'Tab' ) return;
+
+		const focusable = [ ...dialog.querySelectorAll(
+			'button:not([disabled]), select:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])'
+		) ];
+		if ( focusable.length === 0 ) {
+			event.preventDefault();
+			dialog.focus();
+			return;
+		}
+
+		const first = focusable[ 0 ];
+		const last = focusable[ focusable.length - 1 ];
+		if ( event.shiftKey && document.activeElement === first ) {
+			event.preventDefault();
+			last.focus();
+		} else if ( ! event.shiftKey && document.activeElement === last ) {
+			event.preventDefault();
+			first.focus();
+		}
+	} );
+
+	form.addEventListener( 'submit', async ( event ) => {
+		event.preventDefault();
+		if ( select.disabled || select.value === currentValue || switching ) return;
+
+		switching = true;
+		select.disabled = true;
+		submit.disabled = true;
+		form.setAttribute( 'aria-busy', 'true' );
+		clearStatus( status );
+
+		const requestedValue = select.value;
+		const selectedOption = select.selectedOptions[ 0 ];
+		try {
+			const data = await postAjax( {
+				action: config.switchAction,
+				nonce: config.switchNonce,
+				group_id: requestedValue,
+			} );
+			if ( ! data.success ) {
+				throw new Error( errorMessage( data ) );
+			}
+
+			if (
+				! data.data ||
+				! Object.prototype.hasOwnProperty.call( data.data, 'group_id' )
+			) {
+				throw new Error( fallbackMessage() );
+			}
+			const returnedValue = data.data?.group_id === null
+				? ''
+				: String( data.data.group_id );
+			if ( returnedValue !== requestedValue ) {
+				throw new Error( fallbackMessage() );
+			}
+
+			currentValue = returnedValue;
+			currentLabel.textContent = selectedOption?.textContent ||
+				config.personalLabel ||
+				'My Work Group';
+			switching = false;
+			form.removeAttribute( 'aria-busy' );
+			closeDialog();
+			clearStatus( accountStatus );
+			renderStatus(
+				accountStatus,
+				'success',
+				data.data?.message || config.switched || 'Work group switched.'
+			);
+			setTimeout( () => window.location.reload(), 2000 );
+		} catch ( error ) {
+			switching = false;
+			select.disabled = false;
+			form.removeAttribute( 'aria-busy' );
+			updateSubmitState();
+			renderStatus( status, 'error', exceptionMessage( error ) );
+		}
 	} );
 }
 

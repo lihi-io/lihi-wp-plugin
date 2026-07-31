@@ -30,8 +30,10 @@ class Lihi_Client implements Lihi_Client_Interface {
         string $password,
         string $code_challenge
     ): array {
+        $hostname = $this->required_tenant_host();
         $response = $this->request( 'POST', '/api/wordpress/v1/auth/login', [
             'email'          => $email,
+            'hostname'       => $hostname,
             'password'       => $password,
             'code_challenge' => $code_challenge,
         ] );
@@ -43,13 +45,7 @@ class Lihi_Client implements Lihi_Client_Interface {
     }
 
     public function register( string $email, string $password ): void {
-        $hostname = $this->tenant_host();
-        if ( $hostname === '' ) {
-            throw new Lihi_Validation_Exception(
-                esc_html( 'Could not resolve the Wordpress site hostname.' )
-            );
-        }
-
+        $hostname = $this->required_tenant_host();
         $response = $this->request( 'POST', '/api/wordpress/v1/auth/register', [
             'email'    => $email,
             'hostname' => $hostname,
@@ -61,6 +57,11 @@ class Lihi_Client implements Lihi_Client_Interface {
             throw new Lihi_Validation_Exception( esc_html( $this->msg( $data ) ) );
         }
         if ( $response['code'] === 403 ) {
+            if ( $this->message_is( $data, 'registration country unavailable' ) ) {
+                throw new Lihi_Registration_Country_Unavailable_Exception(
+                    esc_html( $this->msg( $data ) )
+                );
+            }
             $this->throw_forbidden_response( $data );
         }
         if ( $response['code'] === 409 ) {
@@ -161,8 +162,50 @@ class Lihi_Client implements Lihi_Client_Interface {
     ): array {
         $response = $this->authenticated_request(
             'GET',
-            '/api/wordpress/v1/user/options',
+            '/api/wordpress/v1/user/domain-options',
             [],
+            $access_token,
+            $access_fallback
+        );
+
+        $this->throw_validation_response( $response['code'], $response['data'] );
+        $this->throw_for_unsuccessful_response(
+            $response['code'],
+            $response['data']
+        );
+
+        return $response['data'];
+    }
+
+    public function get_group_options(
+        string $access_token,
+        callable $access_fallback
+    ): array {
+        $response = $this->authenticated_request(
+            'GET',
+            '/api/wordpress/v1/user/group-options',
+            [],
+            $access_token,
+            $access_fallback
+        );
+
+        $this->throw_for_unsuccessful_response(
+            $response['code'],
+            $response['data']
+        );
+
+        return $response['data'];
+    }
+
+    public function switch_group(
+        string $access_token,
+        ?int $group_id,
+        callable $access_fallback
+    ): array {
+        $response = $this->authenticated_request(
+            'POST',
+            '/api/wordpress/v1/user/switch-group',
+            [ 'group_id' => $group_id ],
             $access_token,
             $access_fallback
         );
@@ -243,7 +286,7 @@ class Lihi_Client implements Lihi_Client_Interface {
             $access_fallback
         );
 
-        $this->throw_validation_response( $response['code'], $response['data'] );
+        $this->throw_site_create_response( $response['code'], $response['data'] );
         $this->throw_for_unsuccessful_response(
             $response['code'],
             $response['data']
@@ -318,6 +361,11 @@ class Lihi_Client implements Lihi_Client_Interface {
 
         if ( $response['code'] === 401 ) {
             throw new Lihi_Token_Invalid_Exception(
+                esc_html( $this->msg( $data ) )
+            );
+        }
+        if ( $response['code'] >= 500 && $response['code'] < 600 ) {
+            throw new Lihi_Server_Exception(
                 esc_html( $this->msg( $data ) )
             );
         }
@@ -473,6 +521,20 @@ class Lihi_Client implements Lihi_Client_Interface {
         }
     }
 
+    private function throw_site_create_response( int $code, array $data ): void {
+        if ( $code !== 400 ) {
+            return;
+        }
+
+        if ( $this->message_is( $data, 'need_upgrade' ) ) {
+            throw new Lihi_Need_Upgrade_Exception(
+                esc_html( $this->msg( $data ) )
+            );
+        }
+
+        $this->throw_validation_response( $code, $data );
+    }
+
     private function throw_for_unsuccessful_response(
         int $code,
         array $data
@@ -489,6 +551,17 @@ class Lihi_Client implements Lihi_Client_Interface {
     private function tenant_host(): string {
         $host = wp_parse_url( home_url(), PHP_URL_HOST );
         return is_string( $host ) ? strtolower( trim( $host ) ) : '';
+    }
+
+    private function required_tenant_host(): string {
+        $hostname = $this->tenant_host();
+        if ( $hostname === '' ) {
+            throw new Lihi_Validation_Exception(
+                esc_html( 'Could not resolve the Wordpress site hostname.' )
+            );
+        }
+
+        return $hostname;
     }
 
     private function response_data( array $response ): array {

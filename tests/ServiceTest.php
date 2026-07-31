@@ -227,19 +227,62 @@ class ServiceTest extends TestCase
     }
 
     /** @test */
+    public function login_stops_after_one_http_leg_when_activation_is_disabled(): void
+    {
+        $client = $this->client();
+        $store  = $this->store();
+        $checks = 0;
+        $failure = new Lihi_Server_Exception('authentication disabled');
+
+        $store->shouldReceive('ensure_enabled')
+            ->times(3)
+            ->andReturnUsing(function () use (&$checks, $failure) {
+                $checks++;
+                if ($checks === 3) {
+                    throw $failure;
+                }
+            });
+        $store->shouldReceive('acquire_lock')->once()->andReturn(true);
+        $store->shouldNotReceive('renew_lock');
+        $store->shouldReceive('release_lock')->once();
+        $store->shouldNotReceive('set');
+        $client->shouldReceive('login')
+            ->once()
+            ->andReturn(['code' => str_repeat('c', 43)]);
+        $client->shouldNotReceive('exchange_authorization_code');
+
+        try {
+            $this->service($client, $store)
+                ->login('user@example.com', 'password');
+            $this->fail('Expected the activation fence to stop Login.');
+        } catch (Lihi_Server_Exception $error) {
+            $this->assertSame($failure, $error);
+        }
+    }
+
+    /** @test */
     public function login_reports_lock_contention_as_authentication_busy(): void
     {
         $client = $this->client();
         $store  = $this->store();
+        $attempts = 0;
 
-        $store->shouldReceive('acquire_lock')->andReturn(false);
+        $store->shouldReceive('acquire_lock')
+            ->andReturnUsing(function () use (&$attempts) {
+                $attempts++;
+                return false;
+            });
         $store->shouldNotReceive('set');
         $client->shouldNotReceive('login');
         $client->shouldNotReceive('exchange_authorization_code');
 
-        $this->expectException(Lihi_Authentication_Busy_Exception::class);
-        $this->service($client, $store)
-            ->login('user@example.com', 'password');
+        try {
+            $this->service($client, $store)
+                ->login('user@example.com', 'password');
+            $this->fail('Expected authentication lock contention.');
+        } catch (Lihi_Authentication_Busy_Exception $error) {
+            $this->assertSame(181, $attempts);
+        }
     }
 
     /** @test */
@@ -436,15 +479,127 @@ class ServiceTest extends TestCase
             ->andReturn([
                 'result' => true,
                 'data'   => [
-                    'user_role' => 'admin',
-                    'end_date'  => '2026-12-31',
+                    'user_role'  => 'admin',
+                    'group_name' => 'Marketing Team',
                 ],
             ]);
 
         $profile = $this->service($client, $store)->get_profile();
 
         $this->assertSame('admin', $profile['user_role']);
-        $this->assertSame('2026-12-31', $profile['end_date']);
+        $this->assertSame('Marketing Team', $profile['group_name']);
+    }
+
+    /** @test */
+    public function profile_normalizes_missing_nullable_fields(): void
+    {
+        $client = $this->client();
+        $store  = $this->store();
+
+        $store->shouldReceive('get')
+            ->once()
+            ->andReturn($this->credentials());
+        $client->shouldReceive('get_profile')
+            ->once()
+            ->andReturn([
+                'result' => true,
+                'data'   => [],
+            ]);
+
+        $this->assertSame(
+            [
+                'user_role'  => null,
+                'group_name' => null,
+            ],
+            $this->service($client, $store)->get_profile()
+        );
+    }
+
+    /**
+     * @return array<string, array{mixed}>
+     */
+    public function malformedProfileProvider(): array
+    {
+        return [
+            'data is not an object' => ['invalid'],
+            'role is an array' => [[
+                'user_role'  => ['admin'],
+                'group_name' => null,
+            ]],
+            'group name is an array' => [[
+                'user_role'  => 'admin',
+                'group_name' => ['Marketing Team'],
+            ]],
+            'role is numeric' => [[
+                'user_role'  => 1,
+                'group_name' => null,
+            ]],
+        ];
+    }
+
+    /**
+     * @dataProvider malformedProfileProvider
+     * @test
+     *
+     * @param mixed $data
+     */
+    public function profile_rejects_values_that_are_not_nullable_strings(
+        $data
+    ): void {
+        $client = $this->client();
+        $store  = $this->store();
+
+        $store->shouldReceive('get')
+            ->once()
+            ->andReturn($this->credentials());
+        $client->shouldReceive('get_profile')
+            ->once()
+            ->andReturn([
+                'result' => true,
+                'data'   => $data,
+            ]);
+
+        $this->expectException(Lihi_Server_Exception::class);
+        $this->expectExceptionMessage('Invalid profile');
+        $this->service($client, $store)->get_profile();
+    }
+
+    /** @test */
+    public function work_group_options_and_switch_use_persisted_access(): void
+    {
+        $client = $this->client();
+        $store  = $this->store();
+        $tokens = $this->credentials();
+
+        $store->shouldReceive('get')->twice()->andReturn($tokens);
+        $client->shouldReceive('get_group_options')
+            ->once()
+            ->with('old-access', Mockery::type('callable'))
+            ->andReturn([
+                'result' => true,
+                'data'   => [
+                    'groups'   => [
+                        ['id' => null, 'name' => 'My Group'],
+                        ['id' => 42, 'name' => 'Marketing Team'],
+                    ],
+                    'group_id' => null,
+                ],
+            ]);
+        $client->shouldReceive('switch_group')
+            ->once()
+            ->with('old-access', 42, Mockery::type('callable'))
+            ->andReturn([
+                'result' => true,
+                'data'   => ['group_id' => 42],
+            ]);
+
+        $service = $this->service($client, $store);
+        $options = $service->get_work_group_options();
+        $groupId = $service->switch_work_group(42);
+
+        $this->assertCount(2, $options['groups']);
+        $this->assertNull($options['group_id']);
+        $this->assertSame(42, $groupId);
     }
 
     /** @test */
@@ -485,12 +640,63 @@ class ServiceTest extends TestCase
 
                 return [
                     'result' => true,
-                    'data'   => ['user_role' => 'user', 'end_date' => null],
+                    'data'   => ['user_role' => 'user', 'group_name' => null],
                 ];
             });
 
         $profile = $this->service($client, $store)->get_profile();
         $this->assertSame('user', $profile['user_role']);
+    }
+
+    /** @test */
+    public function refresh_stops_before_renewal_when_activation_is_disabled(): void
+    {
+        $client  = $this->client();
+        $store   = $this->store();
+        $old     = $this->credentials();
+        $checks  = 0;
+        $failure = new Lihi_Server_Exception('authentication disabled');
+
+        $store->shouldReceive('ensure_enabled')
+            ->times(4)
+            ->andReturnUsing(function () use (&$checks, $failure) {
+                $checks++;
+                if ($checks === 4) {
+                    throw $failure;
+                }
+            });
+        $store->shouldReceive('get')
+            ->times(4)
+            ->andReturn($old, $old, $old, false);
+        $store->shouldReceive('acquire_lock')->once()->andReturn(true);
+        $store->shouldNotReceive('renew_lock');
+        $store->shouldNotReceive('set');
+        $store->shouldReceive('delete_if_uuid')
+            ->once()
+            ->with(self::UUID)
+            ->andReturn(true);
+        $store->shouldReceive('release_lock')->once();
+
+        $client->shouldReceive('refresh_access_token')
+            ->once()
+            ->andReturn([
+                'uuid'          => self::UUID,
+                'token'         => 'new-access',
+                'refresh_token' => 'new-refresh',
+            ]);
+        $client->shouldReceive('get_profile')
+            ->once()
+            ->andReturnUsing(function ($access, $fallback) {
+                $fallback($access);
+            });
+
+        try {
+            $this->service($client, $store)->get_profile();
+            $this->fail('Expected the activation fence to stop Refresh.');
+        } catch (Lihi_Token_Invalid_Exception $error) {
+            $this->assertSame(4, $checks);
+            $this->assertSame($failure, $error->getPrevious());
+        }
     }
 
     /** @test */

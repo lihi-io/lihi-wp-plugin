@@ -43,7 +43,10 @@ class AjaxCopyUrlTest extends TestCase
         return Mockery::mock(Lihi_Service::class);
     }
 
-    private function expectJsonError(?string &$message, ?int &$statusCode): void
+    /**
+     * @param mixed $message
+     */
+    private function expectJsonError(&$message, ?int &$statusCode): void
     {
         Functions\expect('wp_send_json_error')
             ->once()
@@ -686,6 +689,63 @@ class AjaxCopyUrlTest extends TestCase
         \Lihi\ShortUrl\ajax_create_url();
 
         $this->assertStringContainsString('lihi API rejected the request', $errorMsg);
+        $this->assertSame(400, $statusCode);
+    }
+
+    /** @test */
+    public function returns_plugin_owned_need_upgrade_error(): void
+    {
+        $_POST['item_id'] = '42';
+        $_POST['type']    = 'post';
+        $_POST['domain']  = 'go.example.com';
+
+        $service = $this->mockService();
+        $service->shouldReceive('get_or_create_short_url')
+            ->andThrow(new \Lihi\ShortUrl\Lihi_Need_Upgrade_Exception(
+                'need_upgrade'
+            ));
+        \Lihi\ShortUrl\Lihi_Singletons::lihi_service_set($service);
+
+        $errorData  = null;
+        $statusCode = null;
+        $this->expectJsonError($errorData, $statusCode);
+
+        \Lihi\ShortUrl\ajax_create_url();
+
+        $this->assertCount(2, $errorData);
+        $this->assertSame('need_upgrade', $errorData['code']);
+        $this->assertSame(
+            'Please upgrade or renew your lihi plan to create this short URL.',
+            $errorData['message']
+        );
+        $this->assertArrayNotHasKey('type', $errorData);
+        $this->assertSame(400, $statusCode);
+    }
+
+    /** @test */
+    public function site_create_fail_uses_the_validation_error_response(): void
+    {
+        $_POST['item_id'] = '42';
+        $_POST['type']    = 'post';
+        $_POST['domain']  = 'go.example.com';
+
+        $service = $this->mockService();
+        $service->shouldReceive('get_or_create_short_url')
+            ->andThrow(new \Lihi\ShortUrl\Lihi_Validation_Exception(
+                'site_create_fail'
+            ));
+        \Lihi\ShortUrl\Lihi_Singletons::lihi_service_set($service);
+
+        $errorMsg   = null;
+        $statusCode = null;
+        $this->expectJsonError($errorMsg, $statusCode);
+
+        \Lihi\ShortUrl\ajax_create_url();
+
+        $this->assertStringContainsString(
+            'lihi API rejected the request: site_create_fail',
+            $errorMsg
+        );
         $this->assertSame(400, $statusCode);
     }
 

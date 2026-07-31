@@ -6,20 +6,20 @@ Composer 僅在官方 `php:*-cli` 測試 container 內執行；PHP 7.4 與 PHP 8
 
 `make test` 會先停掉開發用 `wordpress` / `db` services，再用 `db_test` 依序跑 `phpunit74`、`phpunit82`，每個 PHPUnit container 跑完即停止。單版使用 `make test74` / `make test82`；coverage targets 採相同逐版模式。
 
-最新完整結果：PHP 7.4 與 PHP 8.2 均為 **202 tests / 524 assertions**。
+目前 test suite 為 **237 tests / 624 assertions**，涵蓋 PHP 7.4 與 PHP 8.2。
 
 CI / packaging：`.github/workflows/package-plugin.yml` 只在 tag push 時執行。Package job 打包 `lihi-short-url/` 成 `build/lihi-short-url.zip`，驗證主檔與 `readme.txt`，上傳 artifact `lihi-short-url-plugin`；release job 下載同一 artifact 建立或更新 GitHub Release。
 
 | Test class | 基底 | 主要範圍 |
 |---|---|---|
 | `AuthClientTest` | `TestCase` + Brain\Monkey | Register / Login / authorization-code / refresh payload 與 auth error mapping |
-| `ClientTest` | `TestCase` + Brain\Monkey | 所有 protected endpoints 的 access fallback、單次 retry 與 fail-closed HTTP parsing |
-| `TokenStoreTest` | `TestCase` + Brain\Monkey | direct-DB credential/epoch/lock reads、INSERT IGNORE mutex、exact-value conditional deletes、flush |
+| `ClientTest` | `TestCase` + Brain\Monkey | 所有 protected endpoints（含 domain/work-group endpoints）的 access fallback、單次 retry、method/path/body 與 fail-closed HTTP parsing |
+| `TokenStoreTest` | `TestCase` + Brain\Monkey | direct-DB credential/epoch/lock reads、INSERT IGNORE mutex、wait/TTL lifecycle budgets、scoped option-cache invalidation、exact-value conditional deletes、flush |
 | `TokenStoreDatabaseTest` | `WP_UnitTestCase` + real MySQL options table | raw serialized tuple CAS、binary exactness、malformed row repair、guarded upsert race |
-| `ServiceTest` | `TestCase` + Brain\Monkey | server-side PKCE、credential persistence、single-flight refresh、protected workflows |
-| `AjaxAuthenticationTest` | `TestCase` + Brain\Monkey | Login / Register / Logout / dashboard AJAX |
+| `ServiceTest` | `TestCase` + Brain\Monkey | server-side PKCE、activation rechecks、credential persistence、profile shape normalization、single-flight refresh、protected workflows |
+| `AjaxAuthenticationTest` | `TestCase` + Brain\Monkey | Login / Register / Logout / work-group options/switch / dashboard AJAX |
 | `AjaxCopyUrlTest` | `TestCase` + Brain\Monkey | options / create / copy / passthrough AJAX |
-| `SettingsPageTest` | `WP_UnitTestCase` | disconnected Login/Register UI 與 connected profile UI |
+| `SettingsPageTest` | `WP_UnitTestCase` | Login-default auth tabs、無 JS query tab fallback（含 non-scalar input）、connected profile / work-group modal UI |
 | `HelperTest` | `WP_UnitTestCase` | bundle-backed email / connected guard / singleton composition |
 | `PluginHooksTest` | `WP_UnitTestCase` | AJAX actions、admin assets、columns、settings registration |
 | `PluginLifecycleTest` | `WP_UnitTestCase` | activation generation、deactivation / activation cleanup |
@@ -62,16 +62,16 @@ CI / packaging：`.github/workflows/package-plugin.yml` 只在 tag push 時執�
 - [x] `enable()` 以 direct `INSERT IGNORE` 建立 random 32-byte / 64-hex、non-autoload generation；只接受 affected rows integer `1`，再 direct-read驗證，mismatch 時 exact-value cleanup
 - [x] lock 使用 non-autoload `lihi_auth_tokens_lock` DB option；acquire 以 direct `INSERT IGNORE` 且只接受 affected rows integer `1`
 - [x] lock owner 才能 release；foreign replacement 不會被誤刪
-- [x] lock 是 45-second renewable lease；只有 byte-exact owner能以 CAS更新 timestamp / owner value
-- [x] renew UPDATE成功但 direct read-back mismatch時，立即 exact-delete renewed value後才清除 local ownership，不留下45秒 orphan lease
-- [x] malformed、empty、超過45秒未續租或 timestamp超前超過45秒的 lock row可 exact-delete後替換
-- [x] `wait_for_access_token_change()` 的 credential / lock polling全用 fresh direct DB；lock已釋放或已 stale但沒有rotation時立即停止等待
+- [x] lock 是 20-second renewable lease；只有 byte-exact owner能以 CAS更新 timestamp / owner value
+- [x] renew UPDATE成功但 direct read-back mismatch時，立即 exact-delete renewed value後才清除 local ownership，不留下20秒 orphan lease
+- [x] malformed、empty、超過20秒未續租或 timestamp超前超過20秒的 lock row可 exact-delete後替換
+- [x] `wait_for_access_token_change()` 的 credential / lock polling全用 fresh direct DB，預設18秒涵蓋15秒 HTTP timeout；lock已釋放或已 stale但沒有rotation時立即停止等待
 - [x] 同一把 auth lock 供完整 Login、完整 Refresh 與 Logout 共用，三種 critical sections 不會重疊
-- [x] `flush()` 取得同一把 auth lock 後刪除 credentials 並 release
+- [x] `flush()` 最多等待18秒取得同一把 auth lock，之後刪除 credentials並 release
 - [x] `flush()` 無法取得 lock時不刪除 credentials，避免破壞 in-flight rotation
-- [x] 每個成功 direct write/delete invalidates option key、`notoptions`、`alloptions`
+- [x] 每個成功 direct write/delete invalidates individual option key與`notoptions`；三個 non-autoload auth options不清除site-wide `alloptions`
 - [x] 每個成功 direct mutation同步 invalidates request credential memo
-- [x] `transition_activation()` 在等待前 disable，取得 lock 後再次 disable + purge，activation 才 enable fresh epoch；任何 exit release owned lock
+- [x] `transition_activation()` 在等待前 disable，22秒內取得20秒 TTL lock後再次 disable + purge，activation才 enable fresh epoch；任何 exit release owned lock，wait budget低於30秒
 
 ---
 
@@ -81,6 +81,7 @@ CI / packaging：`.github/workflows/package-plugin.yml` 只在 tag push 時執�
 
 - [x] `register()` → POST `/api/wordpress/v1/auth/register`
 - [x] body 精確為 `{ email, hostname, password }`；hostname 來自 `home_url()`，不傳 UUID / `is_mobile`
+- [x] HTTP 403 `registration country unavailable` → `Lihi_Registration_Country_Unavailable_Exception`
 - [x] HTTP 409 `account already exists` → `Lihi_Account_Already_Exists_Exception`
 - [x] HTTP 429 → `Lihi_Rate_Limit_Exception`
 - [x] Auth response 只有 HTTP 2xx 且 `result: true` 才成功；非 2xx 即使 body 宣稱 `result: true` 仍 fail closed
@@ -88,7 +89,7 @@ CI / packaging：`.github/workflows/package-plugin.yml` 只在 tag push 時執�
 ### Login and authorization-code exchange
 
 - [x] `login()` → POST `/api/wordpress/v1/auth/login`
-- [x] body 精確為 `{ email, password, code_challenge }`，不傳 hostname / UUID / `is_mobile`
+- [x] body 精確為 `{ email, hostname, password, code_challenge }`；hostname 來自 `home_url()`，不傳 UUID / `is_mobile`
 - [x] `account does not exist`、`password invalid`、`User Invalid` 分別映射到專用 exception
 - [x] `exchange_authorization_code()` → POST `/api/wordpress/v1/auth/token`
 - [x] exchange body 精確為 `{ grant_type: "authorization_code", code, code_verifier }`
@@ -108,7 +109,7 @@ CI / packaging：`.github/workflows/package-plugin.yml` 只在 tag push 時執�
 
 ## Protected client fallback
 
-`get_profile()`、`get_options()`、`create_passthrough_nonce()`、`get_short_link()`、`create_site()` 都接收 access token 與 fallback callback。
+`get_profile()`、`get_options()`、`get_group_options()`、`switch_group()`、`create_passthrough_nonce()`、`get_short_link()`、`create_site()` 都接收 access token 與 fallback callback。
 
 - [x] 每個 protected method 第一次 HTTP 401 時呼叫 fallback，使用 replacement access token 重送相同 method / URL / payload 一次
 - [x] fallback callback 收到實際被拒絕的 access token
@@ -117,7 +118,10 @@ CI / packaging：`.github/workflows/package-plugin.yml` 只在 tag push 時執�
 - [x] HTTP 400 / 403 / 404 / 429 / 5xx 都不呼叫 access fallback
 - [x] malformed / non-JSON HTTP 401 fail closed 為 `Lihi_Server_Exception`，不呼叫 fallback；只有可解析的 API 401 envelope 可 refresh
 - [x] empty HTTP 500 response fail closed
+- [x] HTTP 500 即使 body 使用 `User Invalid` 或 `user_not_found` 仍為 `Lihi_Server_Exception`，不當成 terminal identity failure
 - [x] GET query、POST JSON body、Authorization header 與 passthrough target / challenge 保持原契約
+- [x] Domain options 使用 `GET /user/domain-options`；work-group options 使用 `GET /user/group-options`
+- [x] Work-group switch 使用 `POST /user/switch-group` 並保留 `{ group_id: int|null }` JSON body
 
 ---
 
@@ -130,7 +134,7 @@ CI / packaging：`.github/workflows/package-plugin.yml` 只在 tag push 時執�
 - [x] exchange response 必須包含 valid opaque server session identifier、access token、refresh token
 - [x] Login 在任何遠端呼叫前取得 auth lease，並跨 `/auth/login`、authorization-code exchange、response validation 與 atomic bundle persistence 全程持有
 - [x] Login 在兩段 remote calls之間及 persistence前原子續租；任一續租失去 ownership時停止流程且不寫 credentials
-- [x] Login 在取得 auth lock 前與取得後都 `ensure_enabled()`；deactivation / epoch rotation 發生時不呼叫遠端 auth 或持久化 credentials
+- [x] Login 在取得 auth lock 前、取得後及每段 remote response回來後都 `ensure_enabled()`；deactivation / epoch rotation 發生時不開始下一段 HTTP、不再續租或持久化 credentials
 - [x] service 將 normalized `{ email, uuid, access_token, refresh_token }` 在同一 DB auth lock 內一次保存
 - [x] authorization code 缺失、不完整 exchange 或 persistence failure 不留下 partial credentials；lock 必定 release
 - [x] Register 只呼叫 client，不寫 credential bundle
@@ -140,14 +144,14 @@ CI / packaging：`.github/workflows/package-plugin.yml` 只在 tag push 時執�
 ### Single-flight access fallback
 
 - [x] protected call 在本機 bundle 不完整時直接要求 Login
-- [x] protected workflow 在讀取 bundle 前 `ensure_enabled()`；refresh 在進入與取得 lock 後再次檢查 epoch
+- [x] protected workflow 在讀取 bundle 前 `ensure_enabled()`；refresh 在進入、取得 lock 後及 remote response回來後再次檢查 epoch
 - [x] Profile / options / find / store / passthrough 都從 persisted bundle 使用 access token
 - [x] HTTP 401 fallback 取得同一 auth lease，並從 final tuple re-read跨遠端 refresh、相同 session identifier validation到 atomic bundle replacement全程持有
-- [x] Refresh remote response回來後、validation / persistence前原子續租；續租失敗清除matching old session並要求重新 Login
+- [x] Refresh remote response回來後先重驗 epoch，再於 validation / persistence前原子續租；續租失敗清除matching old session並要求重新 Login
 - [x] refresh 以 persisted UUID + refresh token rotation，保留 email，並 atomic replace 全 bundle
 - [x] 同一 workflow 的前一 endpoint refresh 後，後續 endpoint 使用新 access token
 - [x] fallback 先 re-read：若其他 request 已輪替，直接重用新 access token
-- [x] lock 被占用時等待 winner 寫入新 tuple；missing / stale lease提早停止等待，timeout後不自行並行 refresh
+- [x] lock 被占用時最多等待18秒讓 winner完成15秒 HTTP並寫入新 tuple；missing / stale lease提早停止等待，timeout後不自行並行 refresh
 - [x] refresh 一旦嘗試，任何 `Throwable`（invalid token、429、validation、network / 5xx、malformed success 或 persistence failure）都呼叫 `delete_if_uuid()` 清除相同 server-issued Login-session UUID 的 tuple，並統一要求重新 Login
 - [x] refresh guarded persistence failure 以 UUID 清除該失敗 session
 - [x] refresh cleanup 本身失去 lock或發生 DB error時仍保留原 refresh failure，對使用者回要求重新 Login訊息
@@ -155,6 +159,7 @@ CI / packaging：`.github/workflows/package-plugin.yml` 只在 tag push 時執�
 - [x] 所有已取得 auth lock 的 Refresh success、concurrent-token reuse、terminal error 與 attempted-refresh failure paths 都會 release
 - [x] upstream 已 rotation 但 response malformed 時清除無法再使用的舊 tuple
 - [x] protected `User Invalid` / `user_not_found` / 第二次 401 是 terminal failure，不 refresh，改以 `delete_if_access_token()` conditional-delete matching tuple
+- [x] Register PHP 與 JavaScript 都直接計算 raw password 的 Unicode code points；剛好 6 個可通過，前端不額外 trim 拒絕
 - [x] terminal protected failure 不刪除另一 request 已更新 access token 的 tuple
 
 ### Short URL workflows
@@ -180,6 +185,7 @@ CI / packaging：`.github/workflows/package-plugin.yml` 只在 tag push 時執�
 - [x] Login / Register 捕捉 unexpected `Throwable` 並回 generic 503；`WP_DEBUG` diagnostics 只記 exception class、不記 message，避免 argument / password 洩漏
 - [x] Register 需要 valid email、至少 6 個 Unicode code points 的 password、明確 account-creation consent；PHP 與 JS 計數規則一致
 - [x] Register 傳 raw password 給 service，但 success 只回 verification sent；不建立本機 session
+- [x] Register country unavailable 使用 plugin-owned gettext 文案，不向瀏覽器回傳 upstream `msg`
 - [x] Existing account Register → HTTP 409，引導使用 Login
 - [x] Logout 清除 atomic local bundle
 - [x] Dashboard disconnected 時開 public lihi home；connected 時使用 protected passthrough fallback
@@ -188,14 +194,29 @@ CI / packaging：`.github/workflows/package-plugin.yml` 只在 tag push 時執�
 
 ## Settings page rendering
 
-- [x] Disconnected page 同時渲染獨立 `lihi-login-form` 與 `lihi-register-form`
+- [x] Disconnected page 同時保留獨立 `lihi-login-form` 與 `lihi-register-form`，以互斥 tabs 顯示；預設只顯示 Login
+- [x] `?lihi_auth_tab=register` 在無 JavaScript 時只顯示 Register panel；query value 直接 unslash + sanitize，無效或 non-scalar 值回到 Login；此 read-only UI preference 不要求 nonce
 - [x] Login / Register 各自有 email、password、status；Register 另有唯一 consent checkbox
 - [x] Login / Register 都是 `method="post"`、action 指向 `admin-ajax.php` 的 native fallback forms，並各自包含 hidden `action` 與 `nonce`
 - [x] Disconnected page不預填 email、password、session identifier、access token或refresh token；沒有不可達的 previous-session提示
-- [x] Connected page隱藏 auth forms，顯示 bundle email、profile role / end date 與 Logout
+- [x] Connected page隱藏 auth forms，顯示 bundle email、profile role / work group 與 Logout；`group_name: null` 顯示 `My Work Group`
+- [x] Profile response缺欄 normalize為`null`；`data`或`user_role` / `group_name`型別錯誤時拋service error，不把array傳入`esc_html()`
+- [x] Connected page輸出 Switch button 與具 label/description、初始 hidden、focusable dialog 的 work-group modal；intro 不建立 stacking context，dialog/backdrop 保持在後續 dashboard workspace 上方
+- [n/a] Service heading 以兩個 sentence-level block spans 在句點處換行，各句在窄螢幕仍可自然折行（markup / CSS review）
 - [n/a] Local validation error 設定 `aria-invalid` / `aria-describedby`、連結 live status 並 focus 欄位（JS review）
-- [n/a] Register 成功只把 email 帶到 Login form，不切換 connected UI；Login / Logout 成功顯示訊息 2 秒後才 reload（JS review）
+- [n/a] Register 成功把 email 帶到 Login、切回 Login tab但不切換 connected UI；Login / Logout / work-group switch 成功顯示訊息 2 秒後才 reload（JS review）
 - [n/a] Inline notice 使用 `textContent`；只有 structured password-invalid response 可加入安全 reset link（JS review）
+- [n/a] Auth tabs支援 Arrow/Home/End；work-group modal支援 Escape、focus trap、focus restore，選項與訊息只以 `textContent` 呈現（JS review）
+
+---
+
+## Settings work-group AJAX
+
+- [x] `lihi_group_options` / `lihi_switch_group` 都驗證 nonce、`manage_options` 與 complete credential bundle
+- [x] Options response要求 non-empty groups、每項 nullable-or-positive ID / scalar-or-null name，且目前 `group_id` 必須存在於選項
+- [x] Switch request只接受 present 的空字串（對應 API `null`）或正整數 ID；0、負數、非數字在呼叫 service 前回 HTTP 400
+- [x] Service switch response必須回傳與 requested nullable ID 相同的 `group_id`
+- [x] Work-group handlers沿用 401 expired、403 auth/account、409 disconnected/busy、429 rate limit、503 service、500 unexpected error mapping
 
 ---
 
@@ -210,7 +231,8 @@ CI / packaging：`.github/workflows/package-plugin.yml` 只在 tag push 時執�
 - [x] Create 要求 non-empty domain，sanitize domain / tags / UTM，成功寫 `lihi_already = 1`
 - [x] Copy 只查既有 URL；missing 時寫 `lihi_already = 0` 並回 HTTP 410 / `lihi_missing`
 - [x] Passthrough 接受 absolute short URL、`/myDomain`、`/profile#utm-setting`，只回 nonce / redirect URL
-- [x] Exception mapping：400 validation、401 expired session、403 permission / account unavailable、409 disconnected / auth busy、410 missing URL、429 rate limit、503 service unavailable、500 unexpected
+- [x] Exception mapping：400 validation、400 `need_upgrade` dedicated error、401 expired session、403 permission / account unavailable、409 disconnected / auth busy、410 missing URL、429 rate limit、503 service unavailable、500 unexpected
+- [x] `POST /site/store` 的 `need_upgrade` 對應獨立 exception、`code: need_upgrade` 與 plugin-owned gettext message；`site_create_fail` 維持一般 validation error
 - [n/a] Copy 只有 `lihi_missing` 才切回 Create 並開 modal；其他錯誤保留狀態（JS review）
 - [n/a] Edit 使用 `lihi_copy_url` + `lihi_passthrough_nonce`，不需要專用 AJAX action（JS review）
 - [n/a] Media modal 隱藏 UTM；recommended tags 需點擊才送；clipboard failure 提供 manual prompt（JS review）
@@ -219,15 +241,15 @@ CI / packaging：`.github/workflows/package-plugin.yml` 只在 tag push 時執�
 
 ## Plugin hooks and lifecycle
 
-- [x] Settings actions：`wp_ajax_lihi_login`、`wp_ajax_lihi_register`、`wp_ajax_lihi_logout`、`wp_ajax_lihi_dashboard_passthrough`
+- [x] Settings actions：`wp_ajax_lihi_login`、`wp_ajax_lihi_register`、`wp_ajax_lihi_logout`、`wp_ajax_lihi_group_options`、`wp_ajax_lihi_switch_group`、`wp_ajax_lihi_dashboard_passthrough`
 - [x] Short URL actions：`wp_ajax_lihi_url_options`、`wp_ajax_lihi_create_url`、`wp_ajax_lihi_copy_url`、`wp_ajax_lihi_passthrough_nonce`
 - [x] Settings page不註冊 split email setting；identity 與 tokens 共用 atomic option
 - [x] Settings → lihi Short URL menu 已註冊
 - [x] Connected guard 控制 list columns、attachment field與 assets；disconnected 時不註冊 Short URL UI
 - [x] Post / media columns 與 attachment panel輸出 frontend mount container，反映 `lihi_already`
 - [x] Assets 僅在 edit / upload / post / post-new screens enqueue，split JS dependency order 正確
-- [x] Activation 完整 transition：先 disable fence、35-second wait取 lock、lock內再次 disable/purge、enable fresh non-autoload epoch、release；啟用後保持 disconnected
-- [x] Deactivation / uninstall 完整 transition：先 disable fence、35-second wait取 lock、lock內再次 disable/purge/驗證仍 disabled、release
+- [x] Activation 完整 transition：先 disable fence、22-second wait取20-second TTL lock、lock內再次 disable/purge、enable fresh non-autoload epoch、release；啟用後保持 disconnected
+- [x] Deactivation / uninstall 完整 transition：先 disable fence、22-second wait取20-second TTL lock、lock內再次 disable/purge/驗證仍 disabled、release
 - [x] Activation / deactivation callbacks 自行 `require_once` exceptions 與 TokenStore，不依賴 admin-only bootstrap 或 singleton registry
 - [x] Lifecycle transition failure 時 best-effort fallback 分別嘗試 `disable()` / `delete()` 並吞掉 cleanup errors，不讓 hook fatal
 - [x] Lifecycle fallback 不直接刪除 foreign auth lock；epoch 缺失時 authentication 維持 disabled，unguarded late write 無法通過 guarded upsert

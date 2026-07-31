@@ -26,8 +26,8 @@ interface Lihi_Client_Interface {
     // -------------------------------------------------------------------------
 
     /**
-     * Exchange account credentials and a PKCE challenge for an authorization
-     * code.
+     * Exchange account credentials, the current Wordpress hostname, and a
+     * PKCE challenge for an authorization code.
      *
      * POST /api/wordpress/v1/auth/login
      *
@@ -87,7 +87,7 @@ interface Lihi_Client_Interface {
      *
      * @return array{
      *   result: bool,
-     *   data: array{user_role: ?string, end_date: ?string},
+     *   data: array{user_role: ?string, group_name: ?string},
      * }
      */
     public function get_profile(
@@ -109,6 +109,36 @@ interface Lihi_Client_Interface {
      */
     public function get_options(
         string $access_token,
+        callable $access_fallback
+    ): array;
+
+    /**
+     * @param callable(string): string $access_fallback
+     *
+     * @return array{
+     *   result: bool,
+     *   data: array{
+     *     groups: list<array{id: ?int, name: ?string}>,
+     *     group_id: ?int,
+     *   },
+     * }
+     */
+    public function get_group_options(
+        string $access_token,
+        callable $access_fallback
+    ): array;
+
+    /**
+     * @param callable(string): string $access_fallback
+     *
+     * @return array{
+     *   result: bool,
+     *   data: array{group_id: ?int},
+     * }
+     */
+    public function switch_group(
+        string $access_token,
+        ?int $group_id,
         callable $access_fallback
     ): array;
 

@@ -19,10 +19,17 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 class Lihi_Token_Store {
 
-    private const OPTION_KEY = 'lihi_auth_tokens';
-    private const LOCK_KEY   = 'lihi_auth_tokens_lock';
-    private const EPOCH_KEY  = 'lihi_auth_epoch';
-    private const LOCK_TTL   = 45;
+    // One protected request may spend up to 15 seconds in HTTP. Waiters allow
+    // a small completion/persistence margin before reporting contention.
+    public const AUTH_LOCK_WAIT_US = 18_000_000;
+
+    private const OPTION_KEY        = 'lihi_auth_tokens';
+    private const LOCK_KEY          = 'lihi_auth_tokens_lock';
+    private const EPOCH_KEY         = 'lihi_auth_epoch';
+    // Owners renew between remote legs. Lifecycle fencing prevents another
+    // renewal, so its sub-30-second drain can safely outlive this lease.
+    private const LOCK_TTL          = 20;
+    private const LIFECYCLE_WAIT_US = 22_000_000;
 
     private string $lock_value = '';
     private string $request_epoch;
@@ -257,7 +264,7 @@ class Lihi_Token_Store {
      */
     public function transition_activation(
         bool $enable_after_purge,
-        int $max_wait_us = 35_000_000
+        int $max_wait_us = self::LIFECYCLE_WAIT_US
     ): void {
         // Fence current requests before waiting for an existing Login /
         // Refresh owner. Repeat under the lock to linearize against another
@@ -408,7 +415,7 @@ class Lihi_Token_Store {
      */
     public function wait_for_access_token_change(
         string $rejected_access_token,
-        int $max_wait_us = 3_000_000
+        int $max_wait_us = self::AUTH_LOCK_WAIT_US
     ) {
         $sleep_us = 100_000;
         $waited   = 0;
@@ -442,7 +449,9 @@ class Lihi_Token_Store {
      *
      * @throws Lihi_Server_Exception When the lock remains unavailable.
      */
-    public function flush( int $max_wait_us = 3_000_000 ): void {
+    public function flush(
+        int $max_wait_us = self::AUTH_LOCK_WAIT_US
+    ): void {
         $this->acquire_lock_with_wait( $max_wait_us );
 
         try {
@@ -825,7 +834,6 @@ class Lihi_Token_Store {
         $this->credentials_cache  = false;
         wp_cache_delete( $option_name, 'options' );
         wp_cache_delete( 'notoptions', 'options' );
-        wp_cache_delete( 'alloptions', 'options' );
     }
 
     /**

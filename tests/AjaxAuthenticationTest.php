@@ -8,6 +8,7 @@ use Lihi\ShortUrl\Lihi_Account_Already_Exists_Exception;
 use Lihi\ShortUrl\Lihi_Account_Not_Found_Exception;
 use Lihi\ShortUrl\Lihi_Authentication_Busy_Exception;
 use Lihi\ShortUrl\Lihi_Email_Or_Password_Invalid_Exception;
+use Lihi\ShortUrl\Lihi_Registration_Country_Unavailable_Exception;
 use Lihi\ShortUrl\Lihi_Service;
 use Mockery;
 use PHPUnit\Framework\TestCase;
@@ -303,6 +304,28 @@ class AjaxAuthenticationTest extends TestCase
     }
 
     /** @test */
+    public function register_accepts_exactly_six_unicode_code_points(): void
+    {
+        $password = '密碼測試嗎好';
+        $_POST     = [
+            'email'                   => 'alice@example.com',
+            'password'                => $password,
+            'create_account_consent' => '1',
+        ];
+        $this->mockService()
+            ->shouldReceive( 'register' )
+            ->once()
+            ->with( 'alice@example.com', $password );
+
+        $payload = null;
+        $this->expectJsonSuccess( $payload );
+
+        \Lihi\ShortUrl\ajax_lihi_register();
+
+        $this->assertTrue( $payload['verification_sent'] );
+    }
+
+    /** @test */
     public function register_requires_account_creation_consent(): void
     {
         $_POST = [
@@ -369,6 +392,40 @@ class AjaxAuthenticationTest extends TestCase
     }
 
     /** @test */
+    public function register_localizes_country_unavailable_error(): void
+    {
+        $_POST = [
+            'email'                   => 'alice@example.com',
+            'password'                => 'secret-password',
+            'create_account_consent' => '1',
+        ];
+        $this->mockService()
+            ->shouldReceive( 'register' )
+            ->once()
+            ->andThrow(
+                new Lihi_Registration_Country_Unavailable_Exception(
+                    'registration country unavailable'
+                )
+            );
+
+        $payload = null;
+        $status  = null;
+        $this->expectJsonError( $payload, $status );
+
+        \Lihi\ShortUrl\ajax_lihi_register();
+
+        $this->assertSame( 403, $status );
+        $this->assertSame(
+            'lihi registration is not available in your country or region.',
+            $payload
+        );
+        $this->assertStringNotContainsString(
+            'registration country unavailable',
+            $payload
+        );
+    }
+
+    /** @test */
     public function logout_clears_the_atomic_local_credential_bundle(): void
     {
         $this->mockService()->shouldReceive( 'logout' )->once();
@@ -417,5 +474,118 @@ class AjaxAuthenticationTest extends TestCase
 
         $this->assertTrue( $payload['passthrough'] );
         $this->assertSame( 'nonce-token', $payload['nonce'] );
+    }
+
+    /** @test */
+    public function group_options_return_only_normalized_upstream_choices(): void
+    {
+        Functions\when( 'Lihi\\ShortUrl\\lihi_is_authenticated' )->justReturn( true );
+        $this->mockService()
+            ->shouldReceive( 'get_work_group_options' )
+            ->once()
+            ->andReturn( [
+                'groups' => [
+                    [ 'id' => null, 'name' => 'My Group' ],
+                    [ 'id' => 42, 'name' => 'Marketing Team' ],
+                ],
+                'group_id' => null,
+            ] );
+
+        $payload = null;
+        $this->expectJsonSuccess( $payload );
+
+        \Lihi\ShortUrl\ajax_lihi_group_options();
+
+        $this->assertSame( [
+            [ 'id' => null, 'name' => 'My Group' ],
+            [ 'id' => 42, 'name' => 'Marketing Team' ],
+        ], $payload['groups'] );
+        $this->assertNull( $payload['group_id'] );
+    }
+
+    /** @test */
+    public function group_options_require_manage_options(): void
+    {
+        Functions\when( 'current_user_can' )->justReturn( false );
+        $this->mockService()->shouldNotReceive( 'get_work_group_options' );
+
+        $payload = null;
+        $status  = null;
+        $this->expectJsonError( $payload, $status );
+
+        \Lihi\ShortUrl\ajax_lihi_group_options();
+
+        $this->assertSame( 403, $status );
+        $this->assertStringContainsString( 'permission', $payload );
+    }
+
+    /** @test */
+    public function switch_group_accepts_an_empty_group_id_as_the_personal_group(): void
+    {
+        $_POST['group_id'] = '';
+        Functions\when( 'Lihi\\ShortUrl\\lihi_is_authenticated' )->justReturn( true );
+        $this->mockService()
+            ->shouldReceive( 'switch_work_group' )
+            ->once()
+            ->with( null )
+            ->andReturn( null );
+
+        $payload = null;
+        $this->expectJsonSuccess( $payload );
+
+        \Lihi\ShortUrl\ajax_lihi_switch_group();
+
+        $this->assertNull( $payload['group_id'] );
+    }
+
+    /** @test */
+    public function switch_group_requires_an_authenticated_bundle(): void
+    {
+        $_POST['group_id'] = '42';
+        Functions\when( 'Lihi\\ShortUrl\\lihi_is_authenticated' )->justReturn( false );
+        $this->mockService()->shouldNotReceive( 'switch_work_group' );
+
+        $payload = null;
+        $status  = null;
+        $this->expectJsonError( $payload, $status );
+
+        \Lihi\ShortUrl\ajax_lihi_switch_group();
+
+        $this->assertSame( 409, $status );
+        $this->assertStringContainsString( 'log in', $payload );
+    }
+
+    /**
+     * @return array<string, array{string}>
+     */
+    public function invalidWorkGroupIdProvider(): array
+    {
+        return [
+            'zero'         => [ '0' ],
+            'negative'     => [ '-1' ],
+            'non-numeric'  => [ 'not-a-group' ],
+        ];
+    }
+
+    /**
+     * @dataProvider invalidWorkGroupIdProvider
+     * @test
+     */
+    public function switch_group_rejects_a_non_positive_or_non_numeric_group_id(
+        string $groupId
+    ): void
+    {
+        $_POST['group_id'] = $groupId;
+        Functions\when( 'Lihi\\ShortUrl\\lihi_is_authenticated' )->justReturn( true );
+        $this->mockService()->shouldNotReceive( 'switch_work_group' );
+
+        $payload = null;
+        $status  = null;
+        $this->expectJsonError( $payload, $status );
+
+        \Lihi\ShortUrl\ajax_lihi_switch_group();
+
+        $this->assertSame( 400, $status );
+        $this->assertStringContainsString( 'work group', $payload );
     }
 }

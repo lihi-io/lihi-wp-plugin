@@ -269,7 +269,6 @@ class TokenStoreTest extends TestCase
         foreach ($optionNames as $optionName) {
             $expected[] = [$optionName, 'options'];
             $expected[] = ['notoptions', 'options'];
-            $expected[] = ['alloptions', 'options'];
         }
 
         $this->assertSame($expected, $this->cacheDeletes);
@@ -974,6 +973,53 @@ class TokenStoreTest extends TestCase
             'lihi_auth_tokens_lock',
             'lihi_auth_tokens_lock',
         ]);
+    }
+
+    /** @test */
+    public function auth_and_lifecycle_wait_budgets_cover_one_http_leg_safely(): void
+    {
+        $store = new \ReflectionClass(Lihi_Token_Store::class);
+        $transition = $store->getMethod('transition_activation');
+        $wait = $store->getMethod('wait_for_access_token_change');
+        $flush = $store->getMethod('flush');
+        $leaseTtl = $store->getConstant('LOCK_TTL');
+        $lifecycleWait = $transition->getParameters()[1]->getDefaultValue();
+
+        $this->assertSame(
+            18_000_000,
+            Lihi_Token_Store::AUTH_LOCK_WAIT_US
+        );
+        $this->assertSame(
+            Lihi_Token_Store::AUTH_LOCK_WAIT_US,
+            $wait->getParameters()[1]->getDefaultValue()
+        );
+        $this->assertSame(
+            Lihi_Token_Store::AUTH_LOCK_WAIT_US,
+            $flush->getParameters()[0]->getDefaultValue()
+        );
+        $this->assertSame(20, $leaseTtl);
+        $this->assertSame(22_000_000, $lifecycleWait);
+        $this->assertGreaterThan($leaseTtl * 1_000_000, $lifecycleWait);
+        $this->assertLessThan(30_000_000, $lifecycleWait);
+    }
+
+    /** @test */
+    public function lifecycle_transition_reclaims_an_orphan_within_its_wait_budget(): void
+    {
+        $this->storeTuple($this->tuple());
+        $this->wpdbStub->directLock =
+            (time() - 21) . ':' . str_repeat('a', 32);
+
+        $store = new Lihi_Token_Store();
+        $store->transition_activation(true);
+
+        $this->assertNull($this->wpdbStub->tokens);
+        $this->assertNull($this->wpdbStub->directLock);
+        $this->assertMatchesRegularExpression(
+            '/^[a-f0-9]{64}$/',
+            $this->wpdbStub->epoch
+        );
+        $this->assertNotSame(self::EPOCH, $this->wpdbStub->epoch);
     }
 
     /** @test */

@@ -43,10 +43,17 @@ class SettingsPageTest extends \WP_UnitTestCase
         return (string) ob_get_clean();
     }
 
-    public function test_disconnected_page_renders_separate_login_and_register_forms(): void
+    public function test_disconnected_page_renders_login_and_register_tabs_with_login_selected(): void
     {
         $html = $this->renderPage();
 
+        $this->assertStringContainsString( 'role="tablist"', $html );
+        $this->assertStringContainsString( 'id="lihi-login-tab"', $html );
+        $this->assertStringContainsString( 'id="lihi-register-tab"', $html );
+        $this->assertStringContainsString( 'id="lihi-login-tab" class="lihi-account-tabs__tab is-active"', $html );
+        $this->assertStringContainsString( 'id="lihi-register-tab" class="lihi-account-tabs__tab"', $html );
+        $this->assertStringContainsString( 'id="lihi-login-panel" class="lihi-account-panel__auth-panel"', $html );
+        $this->assertStringContainsString( 'id="lihi-register-panel" class="lihi-account-panel__auth-panel" role="tabpanel" aria-labelledby="lihi-register-tab" hidden', $html );
         $this->assertStringContainsString( '<form id="lihi-login-form"', $html );
         $this->assertStringContainsString( '<form id="lihi-register-form"', $html );
         $this->assertSame( 2, substr_count( $html, 'method="post"' ) );
@@ -67,6 +74,36 @@ class SettingsPageTest extends \WP_UnitTestCase
         $this->assertStringContainsString( 'id="lihi_register_consent" name="create_account_consent" value="1" required aria-required="true"', $html );
         $this->assertStringContainsString( 'id="lihi-login-status"', $html );
         $this->assertStringContainsString( 'id="lihi-register-status"', $html );
+    }
+
+    public function test_register_query_selects_only_the_register_panel_without_javascript(): void
+    {
+        $_GET['lihi_auth_tab'] = 'register';
+
+        try {
+            $html = $this->renderPage();
+        } finally {
+            unset( $_GET['lihi_auth_tab'] );
+        }
+
+        $this->assertStringContainsString( 'id="lihi-login-tab" class="lihi-account-tabs__tab"', $html );
+        $this->assertStringContainsString( 'id="lihi-register-tab" class="lihi-account-tabs__tab is-active"', $html );
+        $this->assertStringContainsString( 'id="lihi-login-panel" class="lihi-account-panel__auth-panel" role="tabpanel" aria-labelledby="lihi-login-tab" hidden', $html );
+        $this->assertStringNotContainsString( 'id="lihi-register-panel" class="lihi-account-panel__auth-panel" role="tabpanel" aria-labelledby="lihi-register-tab" hidden', $html );
+    }
+
+    public function test_non_scalar_auth_tab_query_falls_back_to_login(): void
+    {
+        $_GET['lihi_auth_tab'] = [ 'register' ];
+
+        try {
+            $html = $this->renderPage();
+        } finally {
+            unset( $_GET['lihi_auth_tab'] );
+        }
+
+        $this->assertStringContainsString( 'id="lihi-login-tab" class="lihi-account-tabs__tab is-active"', $html );
+        $this->assertStringContainsString( 'id="lihi-register-panel" class="lihi-account-panel__auth-panel" role="tabpanel" aria-labelledby="lihi-register-tab" hidden', $html );
     }
 
     public function test_disconnected_page_never_prefills_credentials(): void
@@ -95,8 +132,8 @@ class SettingsPageTest extends \WP_UnitTestCase
         $service->shouldReceive( 'get_profile' )
             ->once()
             ->andReturn( [
-                'user_role' => 'Starter',
-                'end_date'  => '2026-12-31',
+                'user_role'  => 'Starter',
+                'group_name' => 'Marketing Team',
             ] );
         \Lihi\ShortUrl\Lihi_Singletons::lihi_service_set( $service );
 
@@ -107,6 +144,34 @@ class SettingsPageTest extends \WP_UnitTestCase
         $this->assertStringContainsString( 'id="lihi-logout"', $html );
         $this->assertStringContainsString( 'alice@example.com', $html );
         $this->assertStringContainsString( 'Starter', $html );
-        $this->assertStringContainsString( '2026-12-31', $html );
+        $this->assertStringContainsString( 'Marketing Team', $html );
+        $this->assertStringNotContainsString( 'Plan End Date', $html );
+        $this->assertStringContainsString( 'id="lihi-switch-work-group"', $html );
+        $this->assertStringContainsString( 'id="lihi-work-group-modal"', $html );
+        $this->assertStringContainsString( 'id="lihi-work-group-select"', $html );
+    }
+
+    public function test_connected_profile_labels_a_null_group_as_my_work_group(): void
+    {
+        add_option( 'lihi_auth_tokens', [
+            'email'         => 'alice@example.com',
+            'uuid'          => '2df6f4f1-2a75-4d0e-9ce0-7c70e8d7bb9e',
+            'access_token'  => 'header.payload.signature',
+            'refresh_token' => 'refresh.payload.signature',
+        ], '', 'no' );
+        \Lihi\ShortUrl\Lihi_Singletons::lihi_token_store_set( null );
+
+        $service = Mockery::mock( Lihi_Service::class );
+        $service->shouldReceive( 'get_profile' )
+            ->once()
+            ->andReturn( [
+                'user_role'  => 'Starter',
+                'group_name' => null,
+            ] );
+        \Lihi\ShortUrl\Lihi_Singletons::lihi_service_set( $service );
+
+        $html = $this->renderPage();
+
+        $this->assertStringContainsString( 'id="lihi-current-work-group">My Work Group</span>', $html );
     }
 }

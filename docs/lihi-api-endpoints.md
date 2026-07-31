@@ -10,12 +10,14 @@ Endpoint contract：
 
 | Endpoint | Auth | 契約 |
 |---|---|---|
-| `POST /auth/register` | none | 建立主帳號驗證資料並寄驗證信；不登入、不發 tokens |
+| `POST /auth/register` | none | 檢查註冊 request 國家並快照 IP/device；允許時才建立驗證資料與寄信 |
 | `POST /auth/login` | none | 驗證既有主帳號密碼與 PKCE challenge，回單次 authorization code |
 | `POST /auth/token` | none | authorization-code exchange 或 refresh-token rotation |
 | `GET /auth/verify-email` | verification token query | 瀏覽器 HTML flow；外掛不直接呼叫 |
-| `GET /user/profile` | access token | 讀取帳號資料 |
-| `GET /user/options` | access token | 建立 modal 的 domains / UTM options |
+| `GET /user/profile` | access token | 讀取方案角色與目前工作群組名稱 |
+| `GET /user/domain-options` | access token | 建立 modal 的 domains / UTM options |
+| `GET /user/group-options` | access token | 讀取此 WordPress client 可用的工作群組與目前 ID |
+| `POST /user/switch-group` | access token | 切換此 WordPress client 使用的工作群組 |
 | `POST /passthrough/nonce` | access token | 產生短效 nonce，供瀏覽器 GET 到 passthrough redirect |
 | `GET /passthrough/redirect` | nonce query | 瀏覽器 HTML/session flow；不是 `Lihi_Client` method |
 | `GET /site/find` / `POST /site/store` | access token | 查詢 / 建立短網址 |
@@ -27,7 +29,7 @@ Authorization: Bearer <data.token>
 Content-Type: application/json
 ```
 
-Auth endpoints 不使用 bearer token。Login 不傳 `hostname`、UUID 或 `is_mobile`；Register 才傳 WordPress hostname；UUID 由第一次 authorization-code exchange 的 server response 產生。對 Register、Login、authorization-code exchange 與 refresh 而言，只有 HTTP 2xx 且 decoded JSON `result === true` 才算成功；非 2xx 即使 body 宣稱 `result: true` 也會 fail closed。Credential store 只接受本文件定義的 current bundle shape，不包含舊 auth shape 的相容或 migration path。
+Auth endpoints 不使用 bearer token。Login 與 Register 都傳由 `home_url()` 解析出的 WordPress hostname；兩者都不傳 UUID 或 `is_mobile`。UUID 由第一次 authorization-code exchange 的 server response 產生。對 Register、Login、authorization-code exchange 與 refresh 而言，只有 HTTP 2xx 且 decoded JSON `result === true` 才算成功；非 2xx 即使 body 宣稱 `result: true` 也會 fail closed。Credential store 只接受本文件定義的 current bundle shape，不包含舊 auth shape 的相容或 migration path。
 
 > 本 contract 不包含 `POST /mail`、site update/delete、`/posts` 或 `/site-urls` 系列 endpoints。
 
@@ -51,18 +53,21 @@ Body：
 - `hostname`：required string；外掛從 `home_url()` 取 host，server 再正規化為小寫 host。
 - `password`：required string，至少 6 字元。外掛只做 WordPress unslash，不 sanitize 或保存密碼。
 
+Server 以註冊 request 的實際來源 IP 執行 GeoIP，並從同一 request 的 User-Agent 判斷 device。Client 傳入的 `country`、`registered_ip` 或 `registered_device` 不屬於 body contract，也不會覆蓋 server-derived 值。國家無法判定或不允許註冊時，server 會在寫入 temporary registration record 與寄信之前拒絕 request。
+
 Response 200：
 
 ```json
 { "result": true, "msg": "" }
 ```
 
-成功只代表驗證信已寄出。Server 將 hostname、email 與 password hash 放在 600-second registration record；使用者必須在信中完成驗證，再回 WordPress 使用 Login。Register response 沒有 `data`、UUID 或 tokens，外掛也不寫入 credential option，因此註冊成功不會讓站台進入 connected state。
+成功只代表驗證信已寄出。Server 將 hostname、email、password hash、country、registration IP 與 device 放在 600-second registration record；使用者必須在信中完成驗證，再回 WordPress 使用 Login。Register response 沒有 `data`、UUID 或 tokens，外掛也不寫入 credential option，因此註冊成功不會讓站台進入 connected state。
 
 錯誤：
 
 - HTTP 400 validation：`{ "result": false, "msg": { ...field errors... } }` → `Lihi_Validation_Exception`
 - HTTP 400 hostname 無法正規化：`{ "result": false, "msg": "bad request" }` → `Lihi_Validation_Exception`
+- HTTP 403 國家無法判定或不可註冊：`{ "result": false, "msg": "registration country unavailable" }` → `Lihi_Registration_Country_Unavailable_Exception`；AJAX 改回 plugin-owned gettext 文案，不直接顯示 upstream `msg`
 - HTTP 403 已刪除、停用或不可使用：`{ "result": false, "msg": "User Invalid" }` → `Lihi_User_Invalid_Exception`
 - HTTP 409 已有可用主帳號：`{ "result": false, "msg": "account already exists" }` → `Lihi_Account_Already_Exists_Exception`
 - HTTP 429：`{ "result": false, "msg": "Too Many Attempts." }` → `Lihi_Rate_Limit_Exception`
@@ -79,12 +84,14 @@ Body：
 ```json
 {
   "email": "alice@example.com",
+  "hostname": "example.com",
   "password": "account-password",
   "code_challenge": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 }
 ```
 
 - `email`：required email，最大 254 字元。
+- `hostname`：required string；外掛從 `home_url()` 取 host，server 正規化後綁到 authorization code 與後續建立的 WordPress client。
 - `password`：required string。
 - `code_challenge`：required 43-character base64url value，即 PHP server 產生的 `base64url(sha256(code_verifier))`。PKCE 固定 S256，不送 `code_challenge_method`。
 
@@ -204,7 +211,7 @@ Response 200 與 authorization-code exchange 完全相同：
 
 ## GET `/auth/verify-email`
 
-使用者從 Register 驗證信點擊的 HTML flow；外掛不直接呼叫。Query parameter 是 `token`。成功建立帳號並回 verification-success HTML；缺失、過期、已使用或驗證失敗時回 404 HTML。這個 flow 不發 access / refresh token，也不會自動登入 WordPress 外掛。
+使用者從 Register 驗證信點擊的 HTML flow；外掛不直接呼叫。Query parameter 是 `token`。成功時以 registration record 內在 Register request 階段快照的 country、IP 與 device 建立帳號，再回 verification-success HTML；不重新執行 GeoIP，也不採用點擊驗證連結時的 IP、User-Agent 或 device。缺失、過期、已使用或驗證失敗時回 404 HTML。這個 flow 不發 access / refresh token，也不會自動登入 WordPress 外掛。
 
 ---
 
@@ -213,7 +220,7 @@ Response 200 與 authorization-code exchange 完全相同：
 WordPress 保存：
 
 - `lihi_auth_tokens`：單一 site-scoped、`autoload = no` option，值固定為 `{ email, uuid, access_token, refresh_token }`；任何缺欄、空 email / token，或 `uuid` 不符合 16–128 字元 `[A-Za-z0-9_-]` 都視為 disconnected。Email 在 Login AJAX 驗證後寫入，store 會 trim 並轉小寫；`uuid` 只 trim 且保留 server 回傳的大小寫。沒有獨立 email option；`lihi_email()` 從這個 bundle 讀值。
-- `lihi_auth_tokens_lock`：`autoload = no` 的 45-second renewable DB auth lease；同一把 lease 包住完整 Login、Refresh、Logout、conditional cleanup 與 lifecycle transition。Acquire 使用 options-table `INSERT IGNORE`，只有 `$wpdb->query()` 嚴格回傳 integer `1` 才取得 ownership。Login 在兩段 remote auth calls之間及 persistence前以 byte-exact CAS續租；Refresh在 remote response回來後、validation / persistence前續租。Renew UPDATE成功但 direct read-back mismatch時，store會先 compare-delete exact renewed value才清除 local owner，避免留下只能等待TTL的orphan lease。
+- `lihi_auth_tokens_lock`：`autoload = no` 的 20-second renewable DB auth lease；同一把 lease 包住完整 Login、Refresh、Logout、conditional cleanup 與 lifecycle transition。Acquire 使用 options-table `INSERT IGNORE`，只有 `$wpdb->query()` 嚴格回傳 integer `1` 才取得 ownership。Login 在兩段 remote auth calls之間及 persistence前先重驗 activation epoch，再以 byte-exact CAS續租；Refresh在 remote response回來後同樣先重驗 epoch，才於 validation / persistence前續租。Renew UPDATE成功但 direct read-back mismatch時，store會先 compare-delete exact renewed value才清除 local owner，避免留下只能等待TTL的orphan lease。
 - `lihi_auth_epoch`：`autoload = no` 的 random activation generation，值為 32 random bytes 編碼成 64-character lowercase hex。每次成功 activation 都建立新值；缺失、格式錯誤或與 request captured generation 不同時，auth read / write fail closed。
 
 `get()` 第一次直接查詢 epoch與 credential tuple後，在同一個 `Lihi_Token_Store` / PHP request內 memoize normalized結果；`get_fresh()` 強制 direct read並替換 memo。所有 Login、Refresh、conditional cleanup與protected workflow concurrency paths都使用 `get_fresh()`，因此仍能觀察其他 request剛完成的 rotation；一般 `lihi_email()` / `lihi_is_authenticated()` bootstrap probes則共用 memo，避免每頁重複兩次 direct queries。Direct query以 `CONCAT('x', option_value)` marker區分 missing row（SQL `NULL`）與 present empty row（`"x"`）。DB API不可用或 `$wpdb->last_error`非空時，store契約一律拋 `Lihi_Server_Exception`；但 bootstrap helper catches所有 store failures並降級為 disconnected，避免 include期間打掉整個 wp-admin。Service/AJAX執行路徑仍會正常回報錯誤。
@@ -224,19 +231,19 @@ WordPress 保存：
 
 Lock acquire 與 epoch enable 都直接執行 non-autoloaded `INSERT IGNORE`，並只將 affected rows 嚴格等於 integer `1` 視為成功。不使用 WordPress `add_option()`，因為其既有 row path 可能更新資料，不具嚴格 insert-only mutex 語意。Epoch insert 後以 direct DB read-back驗證；mismatch 時只清除自己剛插入的 exact epoch。
 
-所有 successful direct writes/deletes 都 invalidates option key、`notoptions`、`alloptions` 與 request credential memo。Unconditional credential `delete()` 要求 direct DELETE query成功，並再 direct-read確認 row 已不存在。Read / insert / update / delete 的 DB API缺失、`false` query result或 `$wpdb->last_error`都一致拋 `Lihi_Server_Exception`；`false`僅表示正常 insert contention、guard mismatch或已失去 ownership。Malformed/empty epoch row可由 disable exact-delete後重新 enable；malformed/empty、timestamp超前超過45秒或超過45秒未續租的 lease可 exact-delete後重新 acquire。Waiter看到 lease missing或stale會立刻停止3秒 polling並重試 acquisition；最終仍競爭失敗時回 distinct HTTP 409 authentication-busy message，不誤報 credential write failure。
+所有 successful direct writes/deletes 都 invalidates individual option key、`notoptions` 與 request credential memo。三個 auth options 都固定為 `autoload = no`，因此不清除無關的 site-wide `alloptions` cache。Unconditional credential `delete()` 要求 direct DELETE query成功，並再 direct-read確認 row 已不存在。Read / insert / update / delete 的 DB API缺失、`false` query result或 `$wpdb->last_error`都一致拋 `Lihi_Server_Exception`；`false`僅表示正常 insert contention、guard mismatch或已失去 ownership。Malformed/empty epoch row可由 disable exact-delete後重新 enable；malformed/empty、timestamp超前超過20秒或超過20秒未續租的 lease可 exact-delete後重新 acquire。Refresh waiter、Login lock acquisition與 Logout 最多等待18秒，涵蓋 client 的15秒 HTTP timeout及短暫 persistence margin；看到 lease missing或stale會提早停止。最終仍競爭失敗時回 distinct HTTP 409 authentication-busy message，不誤報 credential write failure。
 
 Connected guard 要求 current epoch 加上完整 `{ email, uuid, access_token, refresh_token }` bundle。Register 不會寫入它。Logout 會清除 bundle。
 
 Lifecycle 規則：
 
-1. Activation callback 自行 `require_once` exception 與 TokenStore files，不依賴 normal admin bootstrap。完整 transition 先 disable epoch fence，再等待最長 35 秒取得 shared lock；lock內再次 disable、purge credentials、enable fresh random non-autoload epoch，最後 release。每次啟用都從 disconnected state 開始。
+1. Activation callback 自行 `require_once` exception 與 TokenStore files，不依賴 normal admin bootstrap。完整 transition 先 disable epoch fence，再等待最長22秒取得 shared lock；lock內再次 disable、purge credentials、enable fresh random non-autoload epoch，最後 release。Login / Refresh 的 remote response回來後會先重驗 epoch，fence失效時不再續租或開始下一段 HTTP，因此 lifecycle只需排空目前一段最長15秒的 request；22秒大於20秒 lease TTL且低於常見30秒 PHP執行上限。每次啟用都從 disconnected state 開始。
 2. Deactivation 使用同一個 self-contained loader與 transition；先 disable fence，lock內再次 disable、purge並驗證 epoch仍不存在，再 release。Uninstall直接 require相同 files並執行 disabled transition。
 3. 任一 transition失敗時，best-effort fallback會分開嘗試 `disable()` 和 `delete()`，各自吞掉 cleanup error以避免 WordPress hook fatal。它不直接刪 foreign lock；epoch成功移除時，即使 credential delete失敗，殘留 tuple也不可使用。
 
-Login 先 direct-DB 驗證 request captured epoch，取得 auth lock 後再驗證一次，才呼叫 `/auth/login`；它跨 authorization-code exchange、response validation 與 atomic bundle write 全程持有 lock，且所有 exit path 都必須 release。Register 在遠端呼叫前驗證 epoch。Protected workflow 在讀取 bundle 前驗證 epoch，Refresh 進入時及取得 lock 後各再驗證一次。Logout 也先取得同一把 lock，避免與 in-flight Login 或 Refresh 交錯。
+Login 先 direct-DB 驗證 request captured epoch，取得 auth lock 後再驗證一次，才呼叫 `/auth/login`；每段 remote response回來後、續租或進入下一段 HTTP前再驗證 epoch。它跨 authorization-code exchange、response validation 與 atomic bundle write 全程持有 lock，且所有 exit path 都必須 release。Register 在遠端呼叫前驗證 epoch。Protected workflow 在讀取 bundle 前驗證 epoch，Refresh 進入時、取得 lock 後及 remote response回來後各再驗證一次。Logout 也先取得同一把 lock，避免與 in-flight Login 或 Refresh 交錯。
 
-Settings Login / Register 是兩個真實的 POST forms，action 指向 WordPress `admin-ajax.php`，各自帶 hidden AJAX action 與 nonce；沒有 JavaScript 時仍走相同 PHP handlers。Register password 的最低長度在 PHP 與 JavaScript 都以 Unicode code points 計算，要求至少 6 個。JavaScript local validation 以 `aria-invalid` / `aria-describedby` 將欄位連到 live status 並 focus 第一個錯誤欄位；Login / Logout 成功先保留訊息 2 秒再 reload，Register 成功仍維持 disconnected。Login / Register AJAX 會捕捉 unexpected `Throwable` 並回 generic service-unavailable response。在 `WP_DEBUG` 下，這兩條 credential-handling paths 也只記錄 exception class，不記錄 exception message，避免 message 夾帶呼叫參數或 password。
+Settings Login / Register 是兩個真實的 POST forms，action 指向 WordPress `admin-ajax.php`，各自帶 hidden AJAX action 與 nonce；沒有 JavaScript 時仍走相同 PHP handlers。只控制顯示狀態的 `lihi_auth_tab` query value 在讀取時直接 unslash + sanitize，僅接受 `register`，無效或 non-scalar 值回到預設 Login；因為不改變 server state，所以不要求 nonce。Register password 的最低長度在 PHP 與 JavaScript 都直接以 raw value 的 Unicode code points 計算，要求至少 6 個，不在其中一端額外 trim。JavaScript local validation 以 `aria-invalid` / `aria-describedby` 將欄位連到 live status 並 focus 第一個錯誤欄位；Login / Logout / work-group switch 成功先保留訊息 2 秒再 reload，work-group switch 透過 reload 重新取得 profile 與 group-scoped page state；Register 成功仍維持 disconnected。Login / Register AJAX 會捕捉 unexpected `Throwable` 並回 generic service-unavailable response。在 `WP_DEBUG` 下，這兩條 credential-handling paths 也只記錄 exception class，不記錄 exception message，避免 message 夾帶呼叫參數或 password。
 
 所有受保護 client methods 使用相同策略：
 
@@ -246,7 +253,7 @@ Settings Login / Register 是兩個真實的 POST forms，action 指向 WordPres
 4. 原本的 protected endpoint 以 replacement access token 重試一次，不會無限重試。
 5. 一旦 refresh 被嘗試，任何 `Throwable`（invalid token、validation / 429、network / 5xx、malformed success 或 guarded persistence failure）都在持鎖狀態以 `delete_if_uuid()` 嘗試清除仍屬於相同 server-issued Login-session UUID 的 raw tuple，並回 re-login session error。Cleanup 本身失敗也不覆蓋這個訊息；intervening replacement因 raw `BINARY` CAS 而不會被清掉。
 
-HTTP 404 `user_not_found ,please login again`、HTTP 403 `User Invalid` 與 refresh 後重試仍回 HTTP 401 都是 terminal protected failure，不會再次 refresh；外掛改用 `delete_if_access_token()`，只在 tuple 仍含 rejected access token 時清除，因此保留另一 request 已成功輪替的 credentials。直接由 protected endpoint 回傳的 HTTP 429、validation、network 與 5xx 不觸發 refresh；但若這些錯誤發生在已由 HTTP 401 啟動的 refresh 嘗試中，則套用上面的 UUID conditional-delete / re-login 規則。
+HTTP 404 `user_not_found ,please login again`、HTTP 403 `User Invalid` 與 refresh 後重試仍回 HTTP 401 都是 terminal protected failure，不會再次 refresh；外掛改用 `delete_if_access_token()`，只在 tuple 仍含 rejected access token 時清除，因此保留另一 request 已成功輪替的 credentials。所有 HTTP 5xx 都在檢查 body message 前固定映射為 `Lihi_Server_Exception`，即使 5xx body 重用 `User Invalid` 或 `user_not_found` 也不會被當成 identity failure 並清除 credentials。直接由 protected endpoint 回傳的 HTTP 429、validation、network 與 5xx 不觸發 refresh；但若這些錯誤發生在已由 HTTP 401 啟動的 refresh 嘗試中，則套用上面的 UUID conditional-delete / re-login 規則。
 
 ---
 
@@ -260,18 +267,21 @@ Response 200:
 ```json
 {
   "result": true,
+  "msg": "",
   "data": {
     "user_role": "admin",
-    "end_date": "2026-12-31"
+    "group_name": "Marketing Team"
   }
 }
 ```
 
-- `user_role` / `end_date` 可能為 `null`（user 無 role 或 plan）
+- `user_role` 可能為 `null`。
+- `group_name` 可能為 `null`；設定頁顯示為 `My Work Group`。
+- Service 將缺失欄位 normalize為 `null`；`data` 非 object/array，或任一欄位不是 string / `null` 時拋 `Lihi_Server_Exception`，設定頁顯示暫時無法取得資料，不把未驗證值傳給 escaping functions。
 
 ---
 
-## GET `/user/options`
+## GET `/user/domain-options`
 
 讀取建立短網址 modal 需要的選項。
 
@@ -297,7 +307,78 @@ Response 200:
 - `utm_sources` / `utm_mediums` 是建立 modal 中 `utm_source` / `utm_medium` 下拉選單的 options；其他 UTM 欄位仍由使用者輸入
 - 前端透過 `lihi_url_options` AJAX 一次取得 domains 與 UTM options，並快取 60 秒
 
-以下為全部受保護 endpoints（`/user/profile`、`/user/options`、`/passthrough/nonce`、`/site/find`、`/site/store`）共用錯誤映射與 fallback 行為。
+---
+
+## GET `/user/group-options`
+
+讀取目前 server-issued WordPress client 可切換的工作群組，以及該 client 目前使用的 group ID。設定頁只有在使用者點擊 Switch、開啟 modal 後才透過 `lihi_group_options` AJAX 呼叫。
+
+Auth: bearer token required.
+
+Response 200:
+
+```json
+{
+  "result": true,
+  "msg": "",
+  "data": {
+    "groups": [
+      { "id": null, "name": "My Group" },
+      { "id": 42, "name": "Marketing Team" }
+    ],
+    "group_id": null
+  }
+}
+```
+
+- `groups` 必須至少包含目前選項。每個 `id` 是正整數或 `null`；`null` 代表主帳號未綁定 group 的個人工作群組。
+- 每個 `name` 是 string 或 `null`。WordPress modal 對 `id: null` 固定顯示 `My Work Group`；非 null ID 若沒有名稱則顯示含 ID 的 unnamed fallback。
+- `group_id` 是此 WordPress client 目前使用的正整數 ID或 `null`，且必須出現在 `groups`。外掛在回傳 browser 前正規化並驗證完整 response。
+
+---
+
+## POST `/user/switch-group`
+
+只切換 bearer token 對應的 server-issued WordPress client，不改變其他 WordPress clients。切換後，同一 access token 的 profile、domain options 與 short-URL calls 都使用新群組；之後 refresh 也延續此 client 的目前群組。
+
+Auth: bearer token required.
+
+Body（切換到指定群組）:
+
+```json
+{ "group_id": 42 }
+```
+
+Body（切換到 ID 為 null 的個人工作群組）:
+
+```json
+{ "group_id": null }
+```
+
+`group_id` 欄位必須存在；值只能是 `null` 或正整數，且必須屬於 `GET /user/group-options` 回傳的可用選項。
+
+Response 200:
+
+```json
+{
+  "result": true,
+  "msg": "",
+  "data": {
+    "group_id": 42
+  }
+}
+```
+
+外掛要求 response `group_id` 與 request 的 nullable ID 完全一致，否則 fail closed 為 `Lihi_Server_Exception`。
+
+錯誤：
+
+- HTTP 400 validation（缺少欄位、非整數或小於 1）→ `Lihi_Validation_Exception`
+- HTTP 400 `{ "result": false, "msg": "group invalid" }`（群組不在 client 可用選項）→ `Lihi_Validation_Exception`
+
+---
+
+以下為全部受保護 endpoints（`/user/profile`、`/user/domain-options`、`/user/group-options`、`/user/switch-group`、`/passthrough/nonce`、`/site/find`、`/site/store`）共用錯誤映射與 fallback 行為。
 
 **錯誤：帳號不可使用** → `Lihi_User_Invalid_Exception`
 ```json
@@ -424,7 +505,7 @@ Response 200，無既有短網址:
 ```
 
 - `site` 是短網址字串；空字串表示沒有既有短網址
-- 此 endpoint 不回傳 domains 或 UTM options；建立 modal 選項請使用 `GET /user/options`
+- 此 endpoint 不回傳 domains 或 UTM options；建立 modal 選項請使用 `GET /user/domain-options`
 
 **錯誤：欄位驗證失敗（HTTP 400）** → `Lihi_Validation_Exception`
 ```json
@@ -456,11 +537,11 @@ Body:
 
 本外掛送出的 `type` 會帶上 WordPress host（格式 `"{type}:{host}"`），與 `GET /site/find` 的查詢條件一致。建立 modal 沒有預設已選 tags；只有使用者實際加入的 tags 會去重後以逗號分隔字串送出。`wordpress`、WordPress host 與原始 `type` 只作為推薦按鈕，點擊後才加入。
 
-建立 modal 透過 `lihi_url_options` / `GET /user/options` 載入 domains、`utm_sources` 與 `utm_mediums`，前端快取 60 秒。Attachment modal 隱藏 UTM controls 並提交空值；後端忽略空白 UTM。有效 UTM 只附加到 destination URL query string，不以獨立 `utm` object 傳給 lihi API。Create 只在 WordPress 端要求 non-empty domain，最終 domain membership 由 lihi API 驗證。
+建立 modal 透過 `lihi_url_options` / `GET /user/domain-options` 載入 domains、`utm_sources` 與 `utm_mediums`，前端快取 60 秒。Attachment modal 隱藏 UTM controls 並提交空值；後端忽略空白 UTM。有效 UTM 只附加到 destination URL query string，不以獨立 `utm` object 傳給 lihi API。Create 只在 WordPress 端要求 non-empty domain，最終 domain membership 由 lihi API 驗證。
 
 Custom domain 與 UTM option management 會在確認後產生 browser verifier / challenge，呼叫 `lihi_passthrough_nonce`，再以 nonce + verifier 開啟 `/passthrough/redirect`。Targets 分別是 `/myDomain` 與 `/profile#utm-setting`。
 
-Short URL UI 只在完整 `{ email, uuid, access_token, refresh_token }` bundle 存在時註冊。PHP 輸出空的 `data-lihi-container`；前端建立 buttons。現行四個 Short URL / passthrough AJAX actions 是 `lihi_url_options`、`lihi_create_url`、`lihi_copy_url`、`lihi_passthrough_nonce`。
+Short URL UI 只在完整 `{ email, uuid, access_token, refresh_token }` bundle 存在時註冊。PHP 輸出空的 `data-lihi-container`；前端建立 buttons。現行四個 Short URL / passthrough AJAX actions 是 `lihi_url_options`、`lihi_create_url`、`lihi_copy_url`、`lihi_passthrough_nonce`；設定頁另有 `lihi_group_options` 與 `lihi_switch_group`。
 
 Find 命中或 Create 成功後，外掛寫入 `lihi_already = 1` 並將 button 顯示為 `Copy`；具備 `manage_options` 的使用者另看到 `Edit`。Clipboard 被阻擋時以 prompt 提供手動複製。Copy 仍用 `GET /site/find` 驗證 upstream URL；missing 時寫入 `lihi_already = 0`，回 HTTP 410 / `lihi_missing`，並在確認後重新開啟 Create modal。Edit 先用 `lihi_copy_url` 取得現存短網址，再將該 URL 作為 `lihi_passthrough_nonce` target；missing 使用相同 410 flow。
 
@@ -490,9 +571,30 @@ Response:
 }
 ```
 
-**錯誤：建立失敗（HTTP 400）**
+**錯誤：需要升級或續約（HTTP 400）**
 ```json
-{ "result": false, "msg": "error" }
+{
+  "result": false,
+  "msg": "need_upgrade"
+}
 ```
+
+**錯誤：其他建立失敗（HTTP 400）**
+```json
+{
+  "result": false,
+  "msg": "site_create_fail"
+}
+```
+
+WordPress endpoint 不回傳 `type`。需要升級或續約的建立失敗使用穩定的 `need_upgrade` 訊息；其他可預期的建立失敗使用 `site_create_fail`。
+
+WordPress client 將 `need_upgrade` 映射成 `Lihi_Need_Upgrade_Exception`，Short URL AJAX 再回傳 plugin-owned gettext message：
+
+```json
+{ "code": "need_upgrade", "message": "..." }
+```
+
+`site_create_fail` 和其他 HTTP 400 維持 `Lihi_Validation_Exception`，走共用 validation error mapping。HTTP 5xx 維持 `Lihi_Server_Exception`。這些 HTTP 400 都不觸發 access-token refresh。
 
 受保護 auth / identity 錯誤與 access fallback 使用上方共用映射。

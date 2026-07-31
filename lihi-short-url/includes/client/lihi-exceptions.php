@@ -20,6 +20,9 @@ class Lihi_Account_Not_Found_Exception extends Lihi_Auth_Exception {}
 /** Registration was attempted for an existing lihi account. */
 class Lihi_Account_Already_Exists_Exception extends Lihi_Exception {}
 
+/** lihi account registration is unavailable in the request country. */
+class Lihi_Registration_Country_Unavailable_Exception extends Lihi_Auth_Exception {}
+
 /** lihi user is invalid server-side. */
 class Lihi_User_Invalid_Exception extends Lihi_Auth_Exception {}
 
@@ -31,6 +34,9 @@ class Lihi_Refresh_Token_Invalid_Exception extends Lihi_Auth_Exception {}
 
 /** HTTP 400 — required fields missing or invalid. */
 class Lihi_Validation_Exception extends Lihi_Exception {}
+
+/** HTTP 400 — the lihi plan must be upgraded or renewed before creating a URL. */
+class Lihi_Need_Upgrade_Exception extends Lihi_Validation_Exception {}
 
 /** HTTP 404 HTML — resource not found. */
 class Lihi_Not_Found_Exception extends Lihi_Exception {}

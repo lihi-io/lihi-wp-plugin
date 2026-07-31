@@ -77,6 +77,18 @@ function enqueue_settings_assets(): void {
             'action' => 'lihi_logout',
             'nonce'  => wp_create_nonce( 'lihi_logout' ),
         ],
+        'workGroup'               => [
+            'optionsAction'   => 'lihi_group_options',
+            'optionsNonce'    => wp_create_nonce( 'lihi_group_options' ),
+            'switchAction'    => 'lihi_switch_group',
+            'switchNonce'     => wp_create_nonce( 'lihi_switch_group' ),
+            'loading'         => __( 'Loading work groups…', 'lihi-short-url' ),
+            'loadFailed'      => __( 'Could not load work groups.', 'lihi-short-url' ),
+            'noOptions'       => __( 'No work groups are available.', 'lihi-short-url' ),
+            'personalLabel'   => __( 'My Work Group', 'lihi-short-url' ),
+            'unnamedLabel'    => __( 'Unnamed Work Group', 'lihi-short-url' ),
+            'switched'        => __( 'Work group switched.', 'lihi-short-url' ),
+        ],
         'dashboardAction'        => 'lihi_dashboard_passthrough',
         'dashboardNonce'         => wp_create_nonce( 'lihi_dashboard_passthrough' ),
         'homeUrl'                => lihi_home_url(),
@@ -87,11 +99,29 @@ function enqueue_settings_assets(): void {
     ] );
 }
 
+function settings_auth_tab(): string {
+    // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- Read-only tab selection does not change state.
+    $tab = isset( $_GET['lihi_auth_tab'] ) ? sanitize_key( wp_unslash( $_GET['lihi_auth_tab'] ) ) : '';
+
+    return $tab === 'register' ? 'register' : 'login';
+}
+
+function settings_auth_tab_url( string $tab ): string {
+    return add_query_arg(
+        [
+            'page'          => 'lihi-settings',
+            'lihi_auth_tab' => $tab === 'register' ? 'register' : 'login',
+        ],
+        admin_url( 'options-general.php' )
+    );
+}
+
 function render_settings_page(): void {
     $connected     = lihi_is_authenticated();
     $email         = $connected ? lihi_email() : '';
     $profile       = null;
     $profile_error = '';
+    $auth_tab      = settings_auth_tab();
 
     if ( $connected ) {
         try {
@@ -120,7 +150,10 @@ function render_settings_page(): void {
         <section class="lihi-services-panel" aria-labelledby="lihi-services-heading">
             <div class="lihi-services-panel__intro">
                 <div class="lihi-services-panel__lead">
-                    <h2 id="lihi-services-heading"><?php esc_html_e( 'Create short URLs in WordPress. Manage the rest in lihi.', 'lihi-short-url' ); ?></h2>
+                    <h2 id="lihi-services-heading">
+                        <span class="lihi-services-panel__heading-line"><?php esc_html_e( 'Create short URLs in WordPress.', 'lihi-short-url' ); ?></span>
+                        <span class="lihi-services-panel__heading-line"><?php esc_html_e( 'Manage the rest in lihi.', 'lihi-short-url' ); ?></span>
+                    </h2>
                     <p class="lihi-services-panel__copy">
                         <span class="lihi-services-panel__copy-line"><?php esc_html_e( 'This plugin provides a simple workflow for creating and using short URLs.', 'lihi-short-url' ); ?></span>
                         <span class="lihi-services-panel__copy-line"><?php esc_html_e( 'For short URL list management, link editing, personal domains, SMS, and growth tools, go to the lihi dashboard.', 'lihi-short-url' ); ?></span>
@@ -176,8 +209,13 @@ function render_settings_page(): void {
                                     <dd><?php echo esc_html( is_array( $profile ) ? ( $profile['user_role'] ?? __( '(none)', 'lihi-short-url' ) ) : __( 'Unavailable', 'lihi-short-url' ) ); ?></dd>
                                 </div>
                                 <div>
-                                    <dt><?php esc_html_e( 'Plan End Date', 'lihi-short-url' ); ?></dt>
-                                    <dd><?php echo esc_html( is_array( $profile ) ? ( $profile['end_date'] ?? __( '—', 'lihi-short-url' ) ) : __( 'Unavailable', 'lihi-short-url' ) ); ?></dd>
+                                    <dt><?php esc_html_e( 'Work Group', 'lihi-short-url' ); ?></dt>
+                                    <dd class="lihi-account-panel__work-group">
+                                        <span id="lihi-current-work-group"><?php echo esc_html( is_array( $profile ) ? ( $profile['group_name'] ?? __( 'My Work Group', 'lihi-short-url' ) ) : __( 'Unavailable', 'lihi-short-url' ) ); ?></span>
+                                        <button type="button" id="lihi-switch-work-group" class="button button-secondary button-small"<?php if ( ! is_array( $profile ) ) : ?> disabled<?php endif; ?>>
+                                            <?php esc_html_e( 'Switch', 'lihi-short-url' ); ?>
+                                        </button>
+                                    </dd>
                                 </div>
                             </dl>
                             <div id="lihi-account-status" role="status" aria-live="polite">
@@ -186,13 +224,41 @@ function render_settings_page(): void {
                                 <?php endif; ?>
                             </div>
                         </div>
+                        <div id="lihi-work-group-modal" class="lihi-work-group-modal" hidden>
+                            <div class="lihi-work-group-modal__backdrop" data-lihi-work-group-close aria-hidden="true"></div>
+                            <div class="lihi-work-group-modal__dialog" role="dialog" aria-modal="true" aria-labelledby="lihi-work-group-modal-title" aria-describedby="lihi-work-group-modal-description" tabindex="-1">
+                                <div class="lihi-work-group-modal__header">
+                                    <div>
+                                        <h2 id="lihi-work-group-modal-title"><?php esc_html_e( 'Switch work group', 'lihi-short-url' ); ?></h2>
+                                        <p id="lihi-work-group-modal-description"><?php esc_html_e( 'Choose which lihi work group this WordPress connection should use.', 'lihi-short-url' ); ?></p>
+                                    </div>
+                                    <button type="button" class="lihi-work-group-modal__close" data-lihi-work-group-close aria-label="<?php esc_attr_e( 'Close work group dialog', 'lihi-short-url' ); ?>">
+                                        <span class="dashicons dashicons-no-alt" aria-hidden="true"></span>
+                                    </button>
+                                </div>
+                                <form id="lihi-work-group-form">
+                                    <label for="lihi-work-group-select"><?php esc_html_e( 'Work Group', 'lihi-short-url' ); ?></label>
+                                    <select id="lihi-work-group-select" name="group_id" disabled></select>
+                                    <div id="lihi-work-group-status" role="status" aria-live="polite"></div>
+                                    <div class="lihi-work-group-modal__actions">
+                                        <button type="button" class="button" data-lihi-work-group-close><?php esc_html_e( 'Cancel', 'lihi-short-url' ); ?></button>
+                                        <button type="submit" id="lihi-work-group-submit" class="button button-primary" disabled><?php esc_html_e( 'Switch work group', 'lihi-short-url' ); ?></button>
+                                    </div>
+                                </form>
+                            </div>
+                        </div>
                     <?php else : ?>
                         <?php if ( $profile_error !== '' ) : ?>
                             <div class="notice notice-warning inline lihi-account-panel__session-notice"><p><?php echo esc_html( $profile_error ); ?></p></div>
                         <?php endif; ?>
 
                         <div class="lihi-account-panel__auth-forms">
-                            <form id="lihi-login-form" class="lihi-account-panel__auth-form" method="post" action="<?php echo esc_url( admin_url( 'admin-ajax.php' ) ); ?>" novalidate>
+                            <nav class="lihi-account-tabs" role="tablist" aria-label="<?php esc_attr_e( 'lihi account access', 'lihi-short-url' ); ?>">
+                                <a id="lihi-login-tab" class="<?php echo esc_attr( 'lihi-account-tabs__tab' . ( $auth_tab === 'login' ? ' is-active' : '' ) ); ?>" href="<?php echo esc_url( settings_auth_tab_url( 'login' ) ); ?>" role="tab" aria-selected="<?php echo esc_attr( $auth_tab === 'login' ? 'true' : 'false' ); ?>" aria-controls="lihi-login-panel" tabindex="<?php echo esc_attr( $auth_tab === 'login' ? '0' : '-1' ); ?>" data-lihi-auth-tab="login"><?php esc_html_e( 'Log in', 'lihi-short-url' ); ?></a>
+                                <a id="lihi-register-tab" class="<?php echo esc_attr( 'lihi-account-tabs__tab' . ( $auth_tab === 'register' ? ' is-active' : '' ) ); ?>" href="<?php echo esc_url( settings_auth_tab_url( 'register' ) ); ?>" role="tab" aria-selected="<?php echo esc_attr( $auth_tab === 'register' ? 'true' : 'false' ); ?>" aria-controls="lihi-register-panel" tabindex="<?php echo esc_attr( $auth_tab === 'register' ? '0' : '-1' ); ?>" data-lihi-auth-tab="register"><?php esc_html_e( 'Register', 'lihi-short-url' ); ?></a>
+                            </nav>
+                            <div id="lihi-login-panel" class="lihi-account-panel__auth-panel" role="tabpanel" aria-labelledby="lihi-login-tab"<?php if ( $auth_tab !== 'login' ) : ?> hidden<?php endif; ?>>
+                                <form id="lihi-login-form" class="lihi-account-panel__auth-form" method="post" action="<?php echo esc_url( admin_url( 'admin-ajax.php' ) ); ?>" novalidate>
                                 <input type="hidden" name="action" value="lihi_login" />
                                 <input type="hidden" name="nonce" value="<?php echo esc_attr( wp_create_nonce( 'lihi_login' ) ); ?>" />
                                 <div>
@@ -217,9 +283,11 @@ function render_settings_page(): void {
                                     <button type="submit" class="button button-primary"><?php esc_html_e( 'Log in', 'lihi-short-url' ); ?></button>
                                 </div>
                                 <div id="lihi-login-status" class="lihi-account-panel__messages" role="status" aria-live="polite"></div>
-                            </form>
+                                </form>
+                            </div>
 
-                            <form id="lihi-register-form" class="lihi-account-panel__auth-form" method="post" action="<?php echo esc_url( admin_url( 'admin-ajax.php' ) ); ?>" novalidate>
+                            <div id="lihi-register-panel" class="lihi-account-panel__auth-panel" role="tabpanel" aria-labelledby="lihi-register-tab"<?php if ( $auth_tab !== 'register' ) : ?> hidden<?php endif; ?>>
+                                <form id="lihi-register-form" class="lihi-account-panel__auth-form" method="post" action="<?php echo esc_url( admin_url( 'admin-ajax.php' ) ); ?>" novalidate>
                                 <input type="hidden" name="action" value="lihi_register" />
                                 <input type="hidden" name="nonce" value="<?php echo esc_attr( wp_create_nonce( 'lihi_register' ) ); ?>" />
                                 <div>
@@ -247,7 +315,8 @@ function render_settings_page(): void {
                                     <button type="submit" class="button button-secondary"><?php esc_html_e( 'Register', 'lihi-short-url' ); ?></button>
                                 </div>
                                 <div id="lihi-register-status" class="lihi-account-panel__messages" role="status" aria-live="polite"></div>
-                            </form>
+                                </form>
+                            </div>
                         </div>
                     <?php endif; ?>
                 </div>
@@ -465,6 +534,11 @@ function send_register_exception( \Throwable $e ): void {
         return;
     }
 
+    if ( $e instanceof Lihi_Registration_Country_Unavailable_Exception ) {
+        wp_send_json_error( __( 'lihi registration is not available in your country or region.', 'lihi-short-url' ), 403 );
+        return;
+    }
+
     if ( $e instanceof Lihi_User_Invalid_Exception ) {
         wp_send_json_error( __( 'Your lihi account is unavailable. Please contact lihi support.', 'lihi-short-url' ), 403 );
         return;
@@ -554,6 +628,216 @@ function ajax_lihi_logout(): void {
 }
 
 add_action( 'wp_ajax_lihi_logout', __NAMESPACE__ . '\\ajax_lihi_logout' );
+
+/**
+ * Normalize one optional work-group ID.
+ *
+ * @param mixed $value
+ */
+function normalize_work_group_id( $value, bool &$valid ): ?int {
+    if ( null === $value || '' === $value ) {
+        $valid = true;
+        return null;
+    }
+
+    if (
+        ! is_int( $value )
+        && ! ( is_string( $value ) && preg_match( '/^[1-9][0-9]*$/', $value ) )
+    ) {
+        $valid = false;
+        return null;
+    }
+
+    $normalized = filter_var(
+        $value,
+        FILTER_VALIDATE_INT,
+        [ 'options' => [ 'min_range' => 1 ] ]
+    );
+    $valid      = false !== $normalized;
+
+    return $valid ? (int) $normalized : null;
+}
+
+/**
+ * Validate the group-options response before returning it to the browser.
+ *
+ * @return array{
+ *   groups: list<array{id: ?int, name: ?string}>,
+ *   group_id: ?int,
+ * }
+ */
+function normalize_work_group_options( array $options ): array {
+    if (
+        ! isset( $options['groups'] )
+        || ! is_array( $options['groups'] )
+        || ! array_key_exists( 'group_id', $options )
+    ) {
+        throw new Lihi_Server_Exception(
+            esc_html__( 'Invalid work-group options returned from lihi API.', 'lihi-short-url' )
+        );
+    }
+
+    $groups = [];
+    foreach ( $options['groups'] as $group ) {
+        if (
+            ! is_array( $group )
+            || ! array_key_exists( 'id', $group )
+            || ! array_key_exists( 'name', $group )
+        ) {
+            throw new Lihi_Server_Exception(
+                esc_html__( 'Invalid work-group option returned from lihi API.', 'lihi-short-url' )
+            );
+        }
+
+        $valid_id = false;
+        $group_id = normalize_work_group_id( $group['id'], $valid_id );
+        if ( ! $valid_id ) {
+            throw new Lihi_Server_Exception(
+                esc_html__( 'Invalid work-group ID returned from lihi API.', 'lihi-short-url' )
+            );
+        }
+
+        $group_name = null;
+        if ( null !== $group['name'] ) {
+            if ( ! is_scalar( $group['name'] ) ) {
+                throw new Lihi_Server_Exception(
+                    esc_html__( 'Invalid work-group name returned from lihi API.', 'lihi-short-url' )
+                );
+            }
+            $group_name = sanitize_text_field( (string) $group['name'] );
+        }
+
+        $groups[] = [
+            'id'   => $group_id,
+            'name' => $group_name,
+        ];
+    }
+
+    $valid_current_id = false;
+    $current_group_id = normalize_work_group_id(
+        $options['group_id'],
+        $valid_current_id
+    );
+    if ( ! $valid_current_id || [] === $groups ) {
+        throw new Lihi_Server_Exception(
+            esc_html__( 'Invalid current work group returned from lihi API.', 'lihi-short-url' )
+        );
+    }
+
+    $current_group_exists = false;
+    foreach ( $groups as $group ) {
+        if ( $group['id'] === $current_group_id ) {
+            $current_group_exists = true;
+            break;
+        }
+    }
+    if ( ! $current_group_exists ) {
+        throw new Lihi_Server_Exception(
+            esc_html__( 'Current work group is missing from lihi API options.', 'lihi-short-url' )
+        );
+    }
+
+    return [
+        'groups'   => $groups,
+        'group_id' => $current_group_id,
+    ];
+}
+
+function send_work_group_exception( \Throwable $e, string $context ): void {
+    if ( $e instanceof Lihi_Authentication_Busy_Exception ) {
+        wp_send_json_error( __( 'Another lihi authentication request is in progress. Please wait and try again.', 'lihi-short-url' ), 409 );
+        return;
+    }
+    if ( $e instanceof Lihi_Token_Invalid_Exception ) {
+        wp_send_json_error( __( 'Your lihi login session has expired. Please sign in again.', 'lihi-short-url' ), 401 );
+        return;
+    }
+    if ( $e instanceof Lihi_User_Invalid_Exception || $e instanceof Lihi_Auth_Exception ) {
+        wp_send_json_error( __( 'lihi rejected this account session. Please sign in again.', 'lihi-short-url' ), 403 );
+        return;
+    }
+    if ( $e instanceof Lihi_Validation_Exception ) {
+        wp_send_json_error( __( 'That work group is not available to this lihi account.', 'lihi-short-url' ), 400 );
+        return;
+    }
+    if ( $e instanceof Lihi_Rate_Limit_Exception ) {
+        wp_send_json_error( __( 'Too many requests. Please wait a moment and try again.', 'lihi-short-url' ), 429 );
+        return;
+    }
+
+    log_settings_exception( $context, $e );
+    if ( $e instanceof Lihi_Server_Exception ) {
+        wp_send_json_error( __( 'The lihi service is unavailable. Please try again later.', 'lihi-short-url' ), 503 );
+        return;
+    }
+
+    wp_send_json_error( __( 'Could not update the work group. Please try again later.', 'lihi-short-url' ), 500 );
+}
+
+function ajax_lihi_group_options(): void {
+    check_ajax_referer( 'lihi_group_options', 'nonce' );
+
+    if ( ! current_user_can( 'manage_options' ) ) {
+        wp_send_json_error( __( 'You do not have permission to view lihi work groups.', 'lihi-short-url' ), 403 );
+        return;
+    }
+    if ( ! lihi_is_authenticated() ) {
+        wp_send_json_error( __( 'Please log in to lihi before choosing a work group.', 'lihi-short-url' ), 409 );
+        return;
+    }
+
+    try {
+        $options = normalize_work_group_options(
+            Lihi_Singletons::lihi_service()->get_work_group_options()
+        );
+        wp_send_json_success( $options );
+    } catch ( \Throwable $e ) {
+        send_work_group_exception( $e, 'work-group options failed' );
+    }
+}
+
+add_action( 'wp_ajax_lihi_group_options', __NAMESPACE__ . '\\ajax_lihi_group_options' );
+
+function ajax_lihi_switch_group(): void {
+    check_ajax_referer( 'lihi_switch_group', 'nonce' );
+
+    if ( ! current_user_can( 'manage_options' ) ) {
+        wp_send_json_error( __( 'You do not have permission to switch lihi work groups.', 'lihi-short-url' ), 403 );
+        return;
+    }
+    if ( ! lihi_is_authenticated() ) {
+        wp_send_json_error( __( 'Please log in to lihi before switching work groups.', 'lihi-short-url' ), 409 );
+        return;
+    }
+
+    // The nonce above protects this request-field read.
+    // phpcs:ignore WordPress.Security.NonceVerification.Missing
+    if ( ! isset( $_POST['group_id'] ) ) {
+        wp_send_json_error( __( 'Please choose a valid work group.', 'lihi-short-url' ), 400 );
+        return;
+    }
+
+    $raw_group_id = settings_posted_value( 'group_id', null );
+    $valid_id     = false;
+    $group_id     = normalize_work_group_id( $raw_group_id, $valid_id );
+    if ( ! $valid_id ) {
+        wp_send_json_error( __( 'Please choose a valid work group.', 'lihi-short-url' ), 400 );
+        return;
+    }
+
+    try {
+        $switched_group_id = Lihi_Singletons::lihi_service()
+            ->switch_work_group( $group_id );
+        wp_send_json_success( [
+            'group_id' => $switched_group_id,
+            'message'  => __( 'Work group switched.', 'lihi-short-url' ),
+        ] );
+    } catch ( \Throwable $e ) {
+        send_work_group_exception( $e, 'work-group switch failed' );
+    }
+}
+
+add_action( 'wp_ajax_lihi_switch_group', __NAMESPACE__ . '\\ajax_lihi_switch_group' );
 
 function parse_dashboard_challenge_field(): string {
     $challenge = settings_posted_text_field( 'challenge' );

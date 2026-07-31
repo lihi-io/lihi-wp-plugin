@@ -53,6 +53,7 @@ class Lihi_Service {
                 $password,
                 $challenge
             );
+            $this->tokens->ensure_enabled();
             $code      = $login['code'] ?? '';
 
             if (
@@ -69,6 +70,7 @@ class Lihi_Service {
                 $code,
                 $verifier
             );
+            $this->tokens->ensure_enabled();
             $this->renew_auth_lock_or_throw();
             $credentials = $this->normalize_credentials_response(
                 $response,
@@ -112,7 +114,7 @@ class Lihi_Service {
     }
 
     /**
-     * @return array{user_role: ?string, end_date: ?string}
+     * @return array{user_role: ?string, group_name: ?string}
      */
     public function get_profile(): array {
         $result = $this->with_access_token(
@@ -124,7 +126,7 @@ class Lihi_Service {
             }
         );
 
-        return $result['data'] ?? [];
+        return $this->normalize_profile_response( $result );
     }
 
     /**
@@ -145,6 +147,68 @@ class Lihi_Service {
         );
 
         return $result['data'] ?? [];
+    }
+
+    /**
+     * @return array{
+     *   groups?: list<array{id: ?int, name: ?string}>,
+     *   group_id?: ?int,
+     * }
+     */
+    public function get_work_group_options(): array {
+        $result = $this->with_access_token(
+            function ( $context, callable $fallback ): array {
+                return $this->client->get_group_options(
+                    $context->access_token,
+                    $fallback
+                );
+            }
+        );
+
+        return $result['data'] ?? [];
+    }
+
+    public function switch_work_group( ?int $group_id ): ?int {
+        $result = $this->with_access_token(
+            function ( $context, callable $fallback ) use ( $group_id ): array {
+                return $this->client->switch_group(
+                    $context->access_token,
+                    $group_id,
+                    $fallback
+                );
+            }
+        );
+        $data = $result['data'] ?? null;
+        if ( ! is_array( $data ) || ! array_key_exists( 'group_id', $data ) ) {
+            throw new Lihi_Server_Exception(
+                esc_html__( 'Invalid work group returned from lihi API.', 'lihi-short-url' )
+            );
+        }
+        $switched_group_id = $data['group_id'];
+
+        if ( null === $group_id && null === $switched_group_id ) {
+            return null;
+        }
+        if (
+            ! is_int( $switched_group_id )
+            && ! (
+                is_string( $switched_group_id )
+                && preg_match( '/^[1-9][0-9]*$/', $switched_group_id )
+            )
+        ) {
+            throw new Lihi_Server_Exception(
+                esc_html__( 'Invalid work group returned from lihi API.', 'lihi-short-url' )
+            );
+        }
+
+        $switched_group_id = (int) $switched_group_id;
+        if ( $switched_group_id !== $group_id ) {
+            throw new Lihi_Server_Exception(
+                esc_html__( 'lihi returned a different work group than requested.', 'lihi-short-url' )
+            );
+        }
+
+        return $switched_group_id;
     }
 
     public function get_or_create_short_url(
@@ -340,6 +404,7 @@ class Lihi_Service {
                     $current['uuid'],
                     $current['refresh_token']
                 );
+                $this->tokens->ensure_enabled();
                 $this->renew_auth_lock_or_throw();
                 $replacement = $this->normalize_credentials_response(
                     $response,
@@ -460,26 +525,29 @@ class Lihi_Service {
     }
 
     private function acquire_login_lock(): void {
-        $locked      = false;
-        $sleep_us    = 100_000;
-        $max_wait_us = 3_000_000;
-        $waited      = 0;
+        $sleep_us = 100_000;
+        $waited   = 0;
 
-        while ( ! $locked && $waited <= $max_wait_us ) {
-            $locked = $this->tokens->acquire_lock();
-            if ( $locked ) {
+        while ( true ) {
+            if ( $this->tokens->acquire_lock() ) {
+                return;
+            }
+
+            if ( $waited >= Lihi_Token_Store::AUTH_LOCK_WAIT_US ) {
                 break;
             }
 
-            usleep( $sleep_us );
-            $waited += $sleep_us;
+            $delay = min(
+                $sleep_us,
+                Lihi_Token_Store::AUTH_LOCK_WAIT_US - $waited
+            );
+            usleep( $delay );
+            $waited += $delay;
         }
 
-        if ( ! $locked ) {
-            throw new Lihi_Authentication_Busy_Exception(
-                esc_html__( 'lihi authentication is busy. Please try again.', 'lihi-short-url' )
-            );
-        }
+        throw new Lihi_Authentication_Busy_Exception(
+            esc_html__( 'lihi authentication is busy. Please try again.', 'lihi-short-url' )
+        );
     }
 
     private function renew_auth_lock_or_throw(): void {
@@ -490,6 +558,36 @@ class Lihi_Service {
         throw new Lihi_Authentication_Busy_Exception(
             esc_html__( 'lihi authentication is busy. Please try again.', 'lihi-short-url' )
         );
+    }
+
+    /**
+     * @param array<string, mixed> $response
+     *
+     * @return array{user_role: ?string, group_name: ?string}
+     */
+    private function normalize_profile_response( array $response ): array {
+        $data = $response['data'] ?? null;
+        if ( ! is_array( $data ) ) {
+            throw new Lihi_Server_Exception(
+                esc_html__( 'Invalid profile returned from lihi API.', 'lihi-short-url' )
+            );
+        }
+
+        $user_role  = $data['user_role'] ?? null;
+        $group_name = $data['group_name'] ?? null;
+        if (
+            ( null !== $user_role && ! is_string( $user_role ) )
+            || ( null !== $group_name && ! is_string( $group_name ) )
+        ) {
+            throw new Lihi_Server_Exception(
+                esc_html__( 'Invalid profile returned from lihi API.', 'lihi-short-url' )
+            );
+        }
+
+        return [
+            'user_role'  => $user_role,
+            'group_name' => $group_name,
+        ];
     }
 
     /**

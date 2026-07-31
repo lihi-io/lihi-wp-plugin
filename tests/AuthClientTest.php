@@ -10,6 +10,7 @@ use Lihi\ShortUrl\Lihi_Authorization_Code_Invalid_Exception;
 use Lihi\ShortUrl\Lihi_Client;
 use Lihi\ShortUrl\Lihi_Email_Or_Password_Invalid_Exception;
 use Lihi\ShortUrl\Lihi_Rate_Limit_Exception;
+use Lihi\ShortUrl\Lihi_Registration_Country_Unavailable_Exception;
 use Lihi\ShortUrl\Lihi_Refresh_Token_Invalid_Exception;
 use Lihi\ShortUrl\Lihi_Server_Exception;
 use Lihi\ShortUrl\Lihi_User_Invalid_Exception;
@@ -75,7 +76,7 @@ class AuthClientTest extends TestCase
     }
 
     /** @test */
-    public function login_posts_credentials_and_pkce_challenge_only(): void
+    public function login_posts_credentials_hostname_and_pkce_challenge(): void
     {
         $challenge = str_repeat('A', 43);
         $capture   = $this->mockRequest(
@@ -99,11 +100,11 @@ class AuthClientTest extends TestCase
         $this->assertSame('POST', $request['args']['method']);
         $this->assertSame([
             'email'          => 'admin@example.com',
+            'hostname'       => 'wp.example.com',
             'password'       => 'account-password',
             'code_challenge' => $challenge,
         ], $body);
         $this->assertArrayNotHasKey('Authorization', $request['args']['headers']);
-        $this->assertArrayNotHasKey('hostname', $body);
         $this->assertArrayNotHasKey('uuid', $body);
         $this->assertArrayNotHasKey('is_mobile', $body);
         $this->assertSame(['code' => 'authorization-code'], $result);
@@ -130,6 +131,8 @@ class AuthClientTest extends TestCase
         foreach ($cases as [$body, $exception]) {
             Monkey\tearDown();
             Monkey\setUp();
+            Functions\when('home_url')->justReturn('https://wp.example.com:8443');
+            Functions\when('wp_parse_url')->justReturn('wp.example.com');
             Functions\when('wp_json_encode')->alias('json_encode');
             Functions\when('esc_html')->returnArg(1);
             $this->mockRequest(403, $body);
@@ -179,6 +182,20 @@ class AuthClientTest extends TestCase
 
         $this->expectException(Lihi_Account_Already_Exists_Exception::class);
         $this->client()->register('existing@example.com', 'password');
+    }
+
+    /** @test */
+    public function register_maps_country_unavailable_error(): void
+    {
+        $this->mockRequest(
+            403,
+            '{"result":false,"msg":"registration country unavailable"}'
+        );
+
+        $this->expectException(
+            Lihi_Registration_Country_Unavailable_Exception::class
+        );
+        $this->client()->register('new@example.com', 'password');
     }
 
     /** @test */

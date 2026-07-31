@@ -264,6 +264,18 @@ function handle_lihi_ajax_exception( \Throwable $e, array $context = [] ): void 
         return;
     }
 
+    if ( $e instanceof Lihi_Need_Upgrade_Exception ) {
+        $data = [
+            'code'    => 'need_upgrade',
+            'message' => __( 'Please upgrade or renew your lihi plan to create this short URL.', 'lihi-short-url' ),
+        ];
+
+        // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- JSON payload is rendered with textContent in lihi-button.js.
+        wp_send_json_error( $data, 400 );
+        // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+        return;
+    }
+
     if ( $e instanceof Lihi_Validation_Exception ) {
         // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- JSON payload is rendered with textContent in lihi-button.js.
         /* translators: %s: validation error message returned by the lihi API. */
