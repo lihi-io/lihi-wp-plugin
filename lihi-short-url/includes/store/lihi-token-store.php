@@ -89,12 +89,7 @@ class Lihi_Token_Store {
             return $this->credentials_cache;
         }
 
-        $stored = $this->read_option_direct( self::OPTION_KEY );
-        if ( is_string( $stored ) ) {
-            $stored = maybe_unserialize( $stored );
-        }
-
-        $this->credentials_cache  = $this->normalize( $stored );
+        $this->credentials_cache  = $this->read_credentials_direct();
         $this->credentials_cached = true;
 
         return $this->credentials_cache;
@@ -266,6 +261,43 @@ class Lihi_Token_Store {
         bool $enable_after_purge,
         int $max_wait_us = self::LIFECYCLE_WAIT_US
     ): void {
+        $this->transition_auth_state(
+            $enable_after_purge,
+            $max_wait_us
+        );
+    }
+
+    /**
+     * Revoke external state while completing the disabled lifecycle
+     * transition under one auth lease.
+     *
+     * The callback receives the newest stored tuple after existing Login /
+     * Refresh work has drained. Its failures are deliberately ignored so
+     * remote availability can never prevent the local purge.
+     *
+     * @param callable(array{
+     *   email: string,
+     *   uuid: string,
+     *   access_token: string,
+     *   refresh_token: string,
+     * }|false): void $before_purge
+     */
+    public function transition_uninstall(
+        callable $before_purge,
+        int $max_wait_us = self::LIFECYCLE_WAIT_US
+    ): void {
+        $this->transition_auth_state(
+            false,
+            $max_wait_us,
+            $before_purge
+        );
+    }
+
+    private function transition_auth_state(
+        bool $enable_after_purge,
+        int $max_wait_us,
+        ?callable $before_purge = null
+    ): void {
         // Fence current requests before waiting for an existing Login /
         // Refresh owner. Repeat under the lock to linearize against another
         // lifecycle transition.
@@ -274,6 +306,19 @@ class Lihi_Token_Store {
 
         try {
             $this->disable();
+
+            if ( null !== $before_purge ) {
+                try {
+                    call_user_func(
+                        $before_purge,
+                        $this->read_credentials_direct()
+                    );
+                } catch ( \Throwable $e ) {
+                    // Remote cleanup is best-effort. Always continue to the
+                    // authoritative local credential purge below.
+                }
+            }
+
             $this->delete();
 
             if ( $enable_after_purge ) {
@@ -286,6 +331,29 @@ class Lihi_Token_Store {
         } finally {
             $this->release_lock();
         }
+    }
+
+    /**
+     * Read and normalize the stored tuple without applying the epoch fence.
+     *
+     * Lifecycle cleanup uses this only after disabling authentication and
+     * acquiring the shared lease, so it can revoke the final remote session
+     * before deleting the otherwise inaccessible local tuple.
+     *
+     * @return array{
+     *   email: string,
+     *   uuid: string,
+     *   access_token: string,
+     *   refresh_token: string,
+     * }|false
+     */
+    private function read_credentials_direct() {
+        $stored = $this->read_option_direct( self::OPTION_KEY );
+        if ( is_string( $stored ) ) {
+            $stored = maybe_unserialize( $stored );
+        }
+
+        return $this->normalize( $stored );
     }
 
     /**
@@ -442,23 +510,6 @@ class Lihi_Token_Store {
         }
 
         return false;
-    }
-
-    /**
-     * Safely clear all credentials after waiting for an in-flight rotation.
-     *
-     * @throws Lihi_Server_Exception When the lock remains unavailable.
-     */
-    public function flush(
-        int $max_wait_us = self::AUTH_LOCK_WAIT_US
-    ): void {
-        $this->acquire_lock_with_wait( $max_wait_us );
-
-        try {
-            $this->delete();
-        } finally {
-            $this->release_lock();
-        }
     }
 
     private function acquire_lock_with_wait( int $max_wait_us ): void {

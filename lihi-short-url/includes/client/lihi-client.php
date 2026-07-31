@@ -4,9 +4,10 @@ namespace Lihi\ShortUrl;
 /**
  * Production lihi Wordpress API client.
  *
- * Auth endpoints are unprotected. Protected endpoints all flow through one
- * retry wrapper which replaces a rejected access token through a caller-owned
- * fallback and retries the same endpoint exactly once.
+ * Login, Register, and token exchange endpoints are unprotected. Logout uses
+ * one bearer-authenticated attempt without refresh. Other protected endpoints
+ * flow through one retry wrapper which replaces a rejected access token
+ * through a caller-owned fallback and retries the same endpoint exactly once.
  */
 
 if ( ! defined( 'ABSPATH' ) ) {
@@ -14,6 +15,8 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 class Lihi_Client implements Lihi_Client_Interface {
+
+    private const LOGOUT_TIMEOUT = 5;
 
     private string $base_url;
 
@@ -130,6 +133,21 @@ class Lihi_Client implements Lihi_Client_Interface {
         $this->throw_for_auth_request_failure( $response['code'], $data );
 
         return $this->response_data( $data );
+    }
+
+    public function logout( string $access_token ): void {
+        $response = $this->authenticated_request_once(
+            'POST',
+            '/api/wordpress/v1/auth/logout',
+            [],
+            $access_token,
+            self::LOGOUT_TIMEOUT
+        );
+
+        $this->throw_for_unsuccessful_response(
+            $response['code'],
+            $response['data']
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -345,13 +363,15 @@ class Lihi_Client implements Lihi_Client_Interface {
         string $method,
         string $path,
         array $body,
-        string $access_token
+        string $access_token,
+        int $timeout = 15
     ): array {
         $response = $this->request(
             $method,
             $path,
             $body,
-            $access_token
+            $access_token,
+            $timeout
         );
 
         $data = $this->decode(
@@ -396,7 +416,8 @@ class Lihi_Client implements Lihi_Client_Interface {
         string $method,
         string $path,
         array $data = [],
-        string $access_token = ''
+        string $access_token = '',
+        int $timeout = 15
     ): array {
         $headers = [
             'Accept'       => 'application/json',
@@ -410,7 +431,7 @@ class Lihi_Client implements Lihi_Client_Interface {
         $args = [
             'method'  => $method,
             'headers' => $headers,
-            'timeout' => 15,
+            'timeout' => $timeout,
         ];
 
         if ( $method === 'GET' && ! empty( $data ) ) {

@@ -79,6 +79,21 @@ interface Lihi_Client_Interface {
     ): array;
 
     // -------------------------------------------------------------------------
+    // Session termination (bearer token, no fallback)
+    // -------------------------------------------------------------------------
+
+    /**
+     * Revoke the current Wordpress client session.
+     *
+     * This bearer-authenticated request is intentionally attempted only once:
+     * Logout must continue with local cleanup when the remote session is
+     * already invalid or lihi is unavailable.
+     *
+     * POST /api/wordpress/v1/auth/logout
+     */
+    public function logout( string $access_token ): void;
+
+    // -------------------------------------------------------------------------
     // Protected API
     // -------------------------------------------------------------------------
 

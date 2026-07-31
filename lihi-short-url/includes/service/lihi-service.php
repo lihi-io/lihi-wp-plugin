@@ -110,7 +110,40 @@ class Lihi_Service {
     }
 
     public function logout(): void {
-        $this->tokens->flush();
+        $this->acquire_login_lock();
+        $failure = null;
+
+        try {
+            $credentials = false;
+
+            try {
+                $credentials = $this->tokens->get_fresh();
+            } catch ( \Throwable $e ) {
+                // A failed read must not prevent the direct local purge below.
+            }
+
+            if ( false !== $credentials ) {
+                try {
+                    $this->client->logout( $credentials['access_token'] );
+                } catch ( \Throwable $e ) {
+                    // Remote Logout is best-effort. The local session remains
+                    // authoritative and must always be cleared.
+                }
+            }
+
+            $this->tokens->delete();
+        } catch ( \Throwable $e ) {
+            $failure = $e;
+            throw $e;
+        } finally {
+            try {
+                $this->tokens->release_lock();
+            } catch ( \Throwable $release_error ) {
+                if ( null === $failure ) {
+                    throw $release_error;
+                }
+            }
+        }
     }
 
     /**

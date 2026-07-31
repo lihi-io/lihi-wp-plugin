@@ -6,15 +6,15 @@ Composer 僅在官方 `php:*-cli` 測試 container 內執行；PHP 7.4 與 PHP 8
 
 `make test` 會先停掉開發用 `wordpress` / `db` services，再用 `db_test` 依序跑 `phpunit74`、`phpunit82`，每個 PHPUnit container 跑完即停止。單版使用 `make test74` / `make test82`；coverage targets 採相同逐版模式。
 
-目前 test suite 為 **237 tests / 624 assertions**，涵蓋 PHP 7.4 與 PHP 8.2。
+目前 test suite 為 **240 tests / 635 assertions**，涵蓋 PHP 7.4 與 PHP 8.2。
 
-CI / packaging：`.github/workflows/package-plugin.yml` 只在 tag push 時執行。Package job 打包 `lihi-short-url/` 成 `build/lihi-short-url.zip`，驗證主檔與 `readme.txt`，上傳 artifact `lihi-short-url-plugin`；release job 下載同一 artifact 建立或更新 GitHub Release。
+CI / packaging：目前 release metadata 為 `1.0.6`，plugin header、WordPress.org Stable tag / changelog / upgrade notice、兩個 test container 的 `COMPOSER_ROOT_VERSION`、asset cache prefix 與翻譯 catalog version 必須一致。`.github/workflows/package-plugin.yml` 只在 tag push 時執行；Package job 打包 `lihi-short-url/` 成 `build/lihi-short-url.zip`，驗證主檔與 `readme.txt`，上傳 artifact `lihi-short-url-plugin`；release job 下載同一 artifact 建立或更新 GitHub Release。
 
 | Test class | 基底 | 主要範圍 |
 |---|---|---|
-| `AuthClientTest` | `TestCase` + Brain\Monkey | Register / Login / authorization-code / refresh payload 與 auth error mapping |
+| `AuthClientTest` | `TestCase` + Brain\Monkey | Register / Login / authorization-code / refresh / one-shot Logout payload 與 auth error mapping |
 | `ClientTest` | `TestCase` + Brain\Monkey | 所有 protected endpoints（含 domain/work-group endpoints）的 access fallback、單次 retry、method/path/body 與 fail-closed HTTP parsing |
-| `TokenStoreTest` | `TestCase` + Brain\Monkey | direct-DB credential/epoch/lock reads、INSERT IGNORE mutex、wait/TTL lifecycle budgets、scoped option-cache invalidation、exact-value conditional deletes、flush |
+| `TokenStoreTest` | `TestCase` + Brain\Monkey | direct-DB credential/epoch/lock reads、INSERT IGNORE mutex、wait/TTL lifecycle budgets、scoped option-cache invalidation、exact-value conditional deletes |
 | `TokenStoreDatabaseTest` | `WP_UnitTestCase` + real MySQL options table | raw serialized tuple CAS、binary exactness、malformed row repair、guarded upsert race |
 | `ServiceTest` | `TestCase` + Brain\Monkey | server-side PKCE、activation rechecks、credential persistence、profile shape normalization、single-flight refresh、protected workflows |
 | `AjaxAuthenticationTest` | `TestCase` + Brain\Monkey | Login / Register / Logout / work-group options/switch / dashboard AJAX |
@@ -22,7 +22,7 @@ CI / packaging：`.github/workflows/package-plugin.yml` 只在 tag push 時執�
 | `SettingsPageTest` | `WP_UnitTestCase` | Login-default auth tabs、無 JS query tab fallback（含 non-scalar input）、connected profile / work-group modal UI |
 | `HelperTest` | `WP_UnitTestCase` | bundle-backed email / connected guard / singleton composition |
 | `PluginHooksTest` | `WP_UnitTestCase` | AJAX actions、admin assets、columns、settings registration |
-| `PluginLifecycleTest` | `WP_UnitTestCase` | activation generation、deactivation / activation cleanup |
+| `PluginLifecycleTest` | `WP_UnitTestCase` | activation generation、deactivation / activation cleanup、uninstall remote Logout成功與失敗路徑 |
 | `AdminNoticeTest` | `WP_UnitTestCase` | connected / disconnected 都不註冊 dashboard-wide setup notice |
 | `PluginLoadedTest` | `WP_UnitTestCase` | plugin bootstrap |
 
@@ -67,8 +67,6 @@ CI / packaging：`.github/workflows/package-plugin.yml` 只在 tag push 時執�
 - [x] malformed、empty、超過20秒未續租或 timestamp超前超過20秒的 lock row可 exact-delete後替換
 - [x] `wait_for_access_token_change()` 的 credential / lock polling全用 fresh direct DB，預設18秒涵蓋15秒 HTTP timeout；lock已釋放或已 stale但沒有rotation時立即停止等待
 - [x] 同一把 auth lock 供完整 Login、完整 Refresh 與 Logout 共用，三種 critical sections 不會重疊
-- [x] `flush()` 最多等待18秒取得同一把 auth lock，之後刪除 credentials並 release
-- [x] `flush()` 無法取得 lock時不刪除 credentials，避免破壞 in-flight rotation
 - [x] 每個成功 direct write/delete invalidates individual option key與`notoptions`；三個 non-autoload auth options不清除site-wide `alloptions`
 - [x] 每個成功 direct mutation同步 invalidates request credential memo
 - [x] `transition_activation()` 在等待前 disable，22秒內取得20秒 TTL lock後再次 disable + purge，activation才 enable fresh epoch；任何 exit release owned lock，wait budget低於30秒
@@ -105,6 +103,12 @@ CI / packaging：`.github/workflows/package-plugin.yml` 只在 tag push 時執�
 - [x] auth endpoint rate limit 使用 typed exception；network / 5xx / unexpected failure envelope fail closed
 - [x] Refresh 只有 HTTP 2xx 且 `result: true` 才能回傳 rotated credentials
 
+### Logout
+
+- [x] `logout()` → POST `/api/wordpress/v1/auth/logout`
+- [x] 使用目前 access token的 Bearer header，不送 request body
+- [x] 使用5秒 timeout；HTTP 401直接拋 token-invalid，不進 access fallback、不 refresh、不 retry
+
 ---
 
 ## Protected client fallback
@@ -139,7 +143,8 @@ CI / packaging：`.github/workflows/package-plugin.yml` 只在 tag push 時執�
 - [x] authorization code 缺失、不完整 exchange 或 persistence failure 不留下 partial credentials；lock 必定 release
 - [x] Register 只呼叫 client，不寫 credential bundle
 - [x] Register 在遠端呼叫前 `ensure_enabled()`，disabled / stale epoch request fail closed
-- [x] Logout 透過 store `flush()` 使用 Login / Refresh 的同一 auth lock 清除完整 bundle
+- [x] Logout 使用 Login / Refresh 的同一 auth lock，fresh-read目前 access token、one-shot呼叫 remote Logout，再刪除完整本機 bundle並 release
+- [x] Remote Logout 的 network / HTTP / response failure會被吞掉，本機 bundle仍必定進入 delete；remote錯誤不會把 UI卡在 connected
 
 ### Single-flight access fallback
 
@@ -250,6 +255,7 @@ CI / packaging：`.github/workflows/package-plugin.yml` 只在 tag push 時執�
 - [x] Assets 僅在 edit / upload / post / post-new screens enqueue，split JS dependency order 正確
 - [x] Activation 完整 transition：先 disable fence、22-second wait取20-second TTL lock、lock內再次 disable/purge、enable fresh non-autoload epoch、release；啟用後保持 disconnected
 - [x] Deactivation / uninstall 完整 transition：先 disable fence、22-second wait取20-second TTL lock、lock內再次 disable/purge/驗證仍 disabled、release
+- [x] `transition_uninstall()` 先 disable fence並取得 lifecycle lock，再以鎖內最終 access token觸發最多5秒的 remote Logout；測試確認 request發生時 epoch已移除、tuple仍存在且lock已持有，remote `WP_Error` 也不阻止 token/lock/epoch cleanup
 - [x] Activation / deactivation callbacks 自行 `require_once` exceptions 與 TokenStore，不依賴 admin-only bootstrap 或 singleton registry
 - [x] Lifecycle transition failure 時 best-effort fallback 分別嘗試 `disable()` / `delete()` 並吞掉 cleanup errors，不讓 hook fatal
 - [x] Lifecycle fallback 不直接刪除 foreign auth lock；epoch 缺失時 authentication 維持 disabled，unguarded late write 無法通過 guarded upsert

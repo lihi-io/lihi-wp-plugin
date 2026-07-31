@@ -13,6 +13,7 @@ use Lihi\ShortUrl\Lihi_Rate_Limit_Exception;
 use Lihi\ShortUrl\Lihi_Registration_Country_Unavailable_Exception;
 use Lihi\ShortUrl\Lihi_Refresh_Token_Invalid_Exception;
 use Lihi\ShortUrl\Lihi_Server_Exception;
+use Lihi\ShortUrl\Lihi_Token_Invalid_Exception;
 use Lihi\ShortUrl\Lihi_User_Invalid_Exception;
 use Mockery;
 use PHPUnit\Framework\TestCase;
@@ -280,6 +281,40 @@ class AuthClientTest extends TestCase
             '11111111-1111-4111-8111-111111111111',
             'invalid-refresh'
         );
+    }
+
+    /** @test */
+    public function logout_revokes_the_bearer_session_without_a_request_body(): void
+    {
+        $capture = $this->mockRequest(200, '{"result":true,"msg":""}');
+
+        $this->client()->logout('current-access-token');
+
+        $request = $capture();
+
+        $this->assertSame(
+            'https://app.lihi.com/api/wordpress/v1/auth/logout',
+            $request['url']
+        );
+        $this->assertSame('POST', $request['args']['method']);
+        $this->assertSame(
+            'Bearer current-access-token',
+            $request['args']['headers']['Authorization']
+        );
+        $this->assertSame(5, $request['args']['timeout']);
+        $this->assertArrayNotHasKey('body', $request['args']);
+    }
+
+    /** @test */
+    public function logout_does_not_refresh_an_invalid_remote_session(): void
+    {
+        $this->mockRequest(
+            401,
+            '{"result":"failed","msg":"Token expired ,please login again"}'
+        );
+
+        $this->expectException(Lihi_Token_Invalid_Exception::class);
+        $this->client()->logout('expired-access-token');
     }
 
     /** @test */

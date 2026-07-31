@@ -981,7 +981,6 @@ class TokenStoreTest extends TestCase
         $store = new \ReflectionClass(Lihi_Token_Store::class);
         $transition = $store->getMethod('transition_activation');
         $wait = $store->getMethod('wait_for_access_token_change');
-        $flush = $store->getMethod('flush');
         $leaseTtl = $store->getConstant('LOCK_TTL');
         $lifecycleWait = $transition->getParameters()[1]->getDefaultValue();
 
@@ -992,10 +991,6 @@ class TokenStoreTest extends TestCase
         $this->assertSame(
             Lihi_Token_Store::AUTH_LOCK_WAIT_US,
             $wait->getParameters()[1]->getDefaultValue()
-        );
-        $this->assertSame(
-            Lihi_Token_Store::AUTH_LOCK_WAIT_US,
-            $flush->getParameters()[0]->getDefaultValue()
         );
         $this->assertSame(20, $leaseTtl);
         $this->assertSame(22_000_000, $lifecycleWait);
@@ -1127,42 +1122,5 @@ class TokenStoreTest extends TestCase
                 ->wait_for_access_token_change('old-access', 3_000_000)
         );
         $this->assertSame(1, $lockReads);
-    }
-
-    /** @test */
-    public function flush_deletes_credentials_while_holding_owned_lock(): void
-    {
-        $this->storeTuple($this->tuple());
-
-        (new Lihi_Token_Store())->flush();
-
-        $this->assertNull($this->wpdbStub->tokens);
-        $this->assertNull($this->wpdbStub->directLock);
-        $this->assertCacheInvalidations([
-            'lihi_auth_tokens_lock',
-            'lihi_auth_tokens',
-            'lihi_auth_tokens_lock',
-        ]);
-    }
-
-    /** @test */
-    public function flush_never_deletes_without_obtaining_the_lock(): void
-    {
-        $this->storeTuple($this->tuple());
-        $this->wpdbStub->directLock =
-            time() . ':' . str_repeat('a', 32);
-
-        try {
-            (new Lihi_Token_Store())->flush(200_000);
-            $this->fail('Expected a held auth lock to reject the flush.');
-        } catch (Lihi_Server_Exception $error) {
-            $this->assertStringContainsString(
-                'Unable to clear',
-                $error->getMessage()
-            );
-        }
-
-        $this->assertNotNull($this->wpdbStub->tokens);
-        $this->assertSame([], $this->cacheDeletes);
     }
 }

@@ -1,8 +1,8 @@
 # lihi WordPress API Endpoints
 
-本外掛對接單一 lihi WordPress API。帳號建立與登入是兩條獨立流程：Register 只寄驗證信；已驗證帳號必須再用 Login 完成 server-side PKCE，才能取得 server-issued UUID、access token 與 rotating refresh token。外掛將登入 email 與這三項 credentials 保存在同一個非 autoload option，所有受保護 API 都能在 access token 被 HTTP 401 拒絕時 refresh 並重試一次。
+本外掛對接單一 lihi WordPress API。帳號建立與登入是兩條獨立流程：Register 只寄驗證信；已驗證帳號必須再用 Login 完成 server-side PKCE，才能取得 server-issued UUID、access token 與 rotating refresh token。外掛將登入 email 與這三項 credentials 保存在同一個非 autoload option；除 one-shot Logout 外，可 refresh 的受保護 API 都能在 access token 被 HTTP 401 拒絕時 refresh 並重試一次。
 
-目前開發版外掛的 base URL：
+`1.0.6` 外掛的 base URL：
 
 - `https://app.lihi.com/api/wordpress/v1`
 
@@ -13,6 +13,7 @@ Endpoint contract：
 | `POST /auth/register` | none | 檢查註冊 request 國家並快照 IP/device；允許時才建立驗證資料與寄信 |
 | `POST /auth/login` | none | 驗證既有主帳號密碼與 PKCE challenge，回單次 authorization code |
 | `POST /auth/token` | none | authorization-code exchange 或 refresh-token rotation |
+| `POST /auth/logout` | access token | 刪除目前 server-issued WordPress client session；best-effort、不 refresh |
 | `GET /auth/verify-email` | verification token query | 瀏覽器 HTML flow；外掛不直接呼叫 |
 | `GET /user/profile` | access token | 讀取方案角色與目前工作群組名稱 |
 | `GET /user/domain-options` | access token | 建立 modal 的 domains / UTM options |
@@ -29,7 +30,7 @@ Authorization: Bearer <data.token>
 Content-Type: application/json
 ```
 
-Auth endpoints 不使用 bearer token。Login 與 Register 都傳由 `home_url()` 解析出的 WordPress hostname；兩者都不傳 UUID 或 `is_mobile`。UUID 由第一次 authorization-code exchange 的 server response 產生。對 Register、Login、authorization-code exchange 與 refresh 而言，只有 HTTP 2xx 且 decoded JSON `result === true` 才算成功；非 2xx 即使 body 宣稱 `result: true` 也會 fail closed。Credential store 只接受本文件定義的 current bundle shape，不包含舊 auth shape 的相容或 migration path。
+Register、Login 與兩種 token grant 不使用 bearer token；Logout 是例外，使用目前 access token。Login 與 Register 都傳由 `home_url()` 解析出的 WordPress hostname；兩者都不傳 UUID 或 `is_mobile`。UUID 由第一次 authorization-code exchange 的 server response 產生。對 Register、Login、authorization-code exchange、refresh 與 Logout 而言，只有 HTTP 2xx 且 decoded JSON `result === true` 才算 client-level 成功；非 2xx 即使 body 宣稱 `result: true` 也會 fail closed。Logout caller會吞掉這個 client error並繼續本機 cleanup。Credential store 只接受本文件定義的 current bundle shape，不包含舊 auth shape 的相容或 migration path。
 
 > 本 contract 不包含 `POST /mail`、site update/delete、`/posts` 或 `/site-urls` 系列 endpoints。
 
@@ -209,6 +210,38 @@ Response 200 與 authorization-code exchange 完全相同：
 
 ---
 
+## POST `/auth/logout`
+
+撤銷目前 access token 所屬的 server-issued WordPress client session。一般 Settings Logout 與 plugin uninstall 都會觸發；request 不帶 JSON body：
+
+```http
+POST /api/wordpress/v1/auth/logout
+Authorization: Bearer <access.jwt.value>
+Accept: application/json
+Content-Type: application/json
+```
+
+Response 200：
+
+```json
+{
+  "result": true,
+  "msg": ""
+}
+```
+
+此 endpoint 是刻意獨立於 protected access-fallback flow 的 one-shot request：
+
+- timeout 為 5 秒，不因 HTTP 401 refresh，也不 retry。
+- 一般 Logout 在取得共用 auth lock 並 fresh-read目前 tuple後呼叫；不論 network、401、5xx、malformed response或其他 `Throwable`，都繼續 direct-delete本機 credential bundle，再 release lock。
+- Auth lock contention統一由 service的 `acquire_login_lock()` 映射為 `Lihi_Authentication_Busy_Exception`；TokenStore不保留另一套不可達的 credential-cleanup wait/error wrapper。
+- Uninstall 先進入 disabled lifecycle transition，排空既有 Login/Refresh並取得共用 lock，再繞過已生效的 epoch fence讀取鎖內最終 tuple、嘗試同一 remote Logout；callback/read/request任何錯誤都吞掉，接著一定 purge本機 credentials。
+- 若本機 credential不存在或無法讀取，就跳過 remote request，仍繼續本機 cleanup。
+
+因此 remote session 已過期或 lihi 暫時不可用都不會把 WordPress 留在 connected 狀態。Local delete / lock release若真的發生 database failure仍依既有 server-error路徑處理，不會被誤當成成功。
+
+---
+
 ## GET `/auth/verify-email`
 
 使用者從 Register 驗證信點擊的 HTML flow；外掛不直接呼叫。Query parameter 是 `token`。成功時以 registration record 內在 Register request 階段快照的 country、IP 與 device 建立帳號，再回 verification-success HTML；不重新執行 GeoIP，也不採用點擊驗證連結時的 IP、User-Agent 或 device。缺失、過期、已使用或驗證失敗時回 404 HTML。這個 flow 不發 access / refresh token，也不會自動登入 WordPress 外掛。
@@ -220,7 +253,7 @@ Response 200 與 authorization-code exchange 完全相同：
 WordPress 保存：
 
 - `lihi_auth_tokens`：單一 site-scoped、`autoload = no` option，值固定為 `{ email, uuid, access_token, refresh_token }`；任何缺欄、空 email / token，或 `uuid` 不符合 16–128 字元 `[A-Za-z0-9_-]` 都視為 disconnected。Email 在 Login AJAX 驗證後寫入，store 會 trim 並轉小寫；`uuid` 只 trim 且保留 server 回傳的大小寫。沒有獨立 email option；`lihi_email()` 從這個 bundle 讀值。
-- `lihi_auth_tokens_lock`：`autoload = no` 的 20-second renewable DB auth lease；同一把 lease 包住完整 Login、Refresh、Logout、conditional cleanup 與 lifecycle transition。Acquire 使用 options-table `INSERT IGNORE`，只有 `$wpdb->query()` 嚴格回傳 integer `1` 才取得 ownership。Login 在兩段 remote auth calls之間及 persistence前先重驗 activation epoch，再以 byte-exact CAS續租；Refresh在 remote response回來後同樣先重驗 epoch，才於 validation / persistence前續租。Renew UPDATE成功但 direct read-back mismatch時，store會先 compare-delete exact renewed value才清除 local owner，避免留下只能等待TTL的orphan lease。
+- `lihi_auth_tokens_lock`：`autoload = no` 的 20-second renewable DB auth lease；同一把 lease 包住完整 Login、Refresh、一般 Logout、conditional cleanup 與 lifecycle transition。Acquire 使用 options-table `INSERT IGNORE`，只有 `$wpdb->query()` 嚴格回傳 integer `1` 才取得 ownership。Login 在兩段 remote auth calls之間及 persistence前先重驗 activation epoch，再以 byte-exact CAS續租；Refresh在 remote response回來後同樣先重驗 epoch，才於 validation / persistence前續租。一般 Logout 持鎖 fresh-read tuple、best-effort呼叫五秒上限的 remote `/auth/logout`、刪除本機 tuple後 release。Renew UPDATE成功但 direct read-back mismatch時，store會先 compare-delete exact renewed value才清除 local owner，避免留下只能等待TTL的orphan lease。
 - `lihi_auth_epoch`：`autoload = no` 的 random activation generation，值為 32 random bytes 編碼成 64-character lowercase hex。每次成功 activation 都建立新值；缺失、格式錯誤或與 request captured generation 不同時，auth read / write fail closed。
 
 `get()` 第一次直接查詢 epoch與 credential tuple後，在同一個 `Lihi_Token_Store` / PHP request內 memoize normalized結果；`get_fresh()` 強制 direct read並替換 memo。所有 Login、Refresh、conditional cleanup與protected workflow concurrency paths都使用 `get_fresh()`，因此仍能觀察其他 request剛完成的 rotation；一般 `lihi_email()` / `lihi_is_authenticated()` bootstrap probes則共用 memo，避免每頁重複兩次 direct queries。Direct query以 `CONCAT('x', option_value)` marker區分 missing row（SQL `NULL`）與 present empty row（`"x"`）。DB API不可用或 `$wpdb->last_error`非空時，store契約一律拋 `Lihi_Server_Exception`；但 bootstrap helper catches所有 store failures並降級為 disconnected，避免 include期間打掉整個 wp-admin。Service/AJAX執行路徑仍會正常回報錯誤。
@@ -233,19 +266,19 @@ Lock acquire 與 epoch enable 都直接執行 non-autoloaded `INSERT IGNORE`，�
 
 所有 successful direct writes/deletes 都 invalidates individual option key、`notoptions` 與 request credential memo。三個 auth options 都固定為 `autoload = no`，因此不清除無關的 site-wide `alloptions` cache。Unconditional credential `delete()` 要求 direct DELETE query成功，並再 direct-read確認 row 已不存在。Read / insert / update / delete 的 DB API缺失、`false` query result或 `$wpdb->last_error`都一致拋 `Lihi_Server_Exception`；`false`僅表示正常 insert contention、guard mismatch或已失去 ownership。Malformed/empty epoch row可由 disable exact-delete後重新 enable；malformed/empty、timestamp超前超過20秒或超過20秒未續租的 lease可 exact-delete後重新 acquire。Refresh waiter、Login lock acquisition與 Logout 最多等待18秒，涵蓋 client 的15秒 HTTP timeout及短暫 persistence margin；看到 lease missing或stale會提早停止。最終仍競爭失敗時回 distinct HTTP 409 authentication-busy message，不誤報 credential write failure。
 
-Connected guard 要求 current epoch 加上完整 `{ email, uuid, access_token, refresh_token }` bundle。Register 不會寫入它。Logout 會清除 bundle。
+Connected guard 要求 current epoch 加上完整 `{ email, uuid, access_token, refresh_token }` bundle。Register 不會寫入它。Logout 先 best-effort撤銷 remote WordPress client，再清除 bundle；remote failure不會阻止本機 cleanup。
 
 Lifecycle 規則：
 
 1. Activation callback 自行 `require_once` exception 與 TokenStore files，不依賴 normal admin bootstrap。完整 transition 先 disable epoch fence，再等待最長22秒取得 shared lock；lock內再次 disable、purge credentials、enable fresh random non-autoload epoch，最後 release。Login / Refresh 的 remote response回來後會先重驗 epoch，fence失效時不再續租或開始下一段 HTTP，因此 lifecycle只需排空目前一段最長15秒的 request；22秒大於20秒 lease TTL且低於常見30秒 PHP執行上限。每次啟用都從 disconnected state 開始。
-2. Deactivation 使用同一個 self-contained loader與 transition；先 disable fence，lock內再次 disable、purge並驗證 epoch仍不存在，再 release。Uninstall直接 require相同 files並執行 disabled transition。
+2. Deactivation 使用同一個 self-contained loader與 transition；先 disable fence，lock內再次 disable、purge並驗證 epoch仍不存在，再 release。Uninstall直接載入最小 client/helper/store dependencies並呼叫 `transition_uninstall()`：先 disable fence、等待並取得同一 lifecycle lock，再 direct-read鎖內最終 credential、做一次最多5秒且不refresh的 remote Logout，然後 purge/release。Callback、read或remote error都在 transition內吞掉，所以清除仍會繼續；22秒 lock wait加5秒 remote timeout的契約上限低於常見30秒 PHP執行上限。
 3. 任一 transition失敗時，best-effort fallback會分開嘗試 `disable()` 和 `delete()`，各自吞掉 cleanup error以避免 WordPress hook fatal。它不直接刪 foreign lock；epoch成功移除時，即使 credential delete失敗，殘留 tuple也不可使用。
 
-Login 先 direct-DB 驗證 request captured epoch，取得 auth lock 後再驗證一次，才呼叫 `/auth/login`；每段 remote response回來後、續租或進入下一段 HTTP前再驗證 epoch。它跨 authorization-code exchange、response validation 與 atomic bundle write 全程持有 lock，且所有 exit path 都必須 release。Register 在遠端呼叫前驗證 epoch。Protected workflow 在讀取 bundle 前驗證 epoch，Refresh 進入時、取得 lock 後及 remote response回來後各再驗證一次。Logout 也先取得同一把 lock，避免與 in-flight Login 或 Refresh 交錯。
+Login 先 direct-DB 驗證 request captured epoch，取得 auth lock 後再驗證一次，才呼叫 `/auth/login`；每段 remote response回來後、續租或進入下一段 HTTP前再驗證 epoch。它跨 authorization-code exchange、response validation 與 atomic bundle write 全程持有 lock，且所有 exit path 都必須 release。Register 在遠端呼叫前驗證 epoch。Protected workflow 在讀取 bundle 前驗證 epoch，Refresh 進入時、取得 lock 後及 remote response回來後各再驗證一次。一般 Logout 也先取得同一把 lock，避免與 in-flight Login 或 Refresh 交錯；remote Logout read/request失敗會被忽略，但本機 delete與release仍執行。
 
 Settings Login / Register 是兩個真實的 POST forms，action 指向 WordPress `admin-ajax.php`，各自帶 hidden AJAX action 與 nonce；沒有 JavaScript 時仍走相同 PHP handlers。只控制顯示狀態的 `lihi_auth_tab` query value 在讀取時直接 unslash + sanitize，僅接受 `register`，無效或 non-scalar 值回到預設 Login；因為不改變 server state，所以不要求 nonce。Register password 的最低長度在 PHP 與 JavaScript 都直接以 raw value 的 Unicode code points 計算，要求至少 6 個，不在其中一端額外 trim。JavaScript local validation 以 `aria-invalid` / `aria-describedby` 將欄位連到 live status 並 focus 第一個錯誤欄位；Login / Logout / work-group switch 成功先保留訊息 2 秒再 reload，work-group switch 透過 reload 重新取得 profile 與 group-scoped page state；Register 成功仍維持 disconnected。Login / Register AJAX 會捕捉 unexpected `Throwable` 並回 generic service-unavailable response。在 `WP_DEBUG` 下，這兩條 credential-handling paths 也只記錄 exception class，不記錄 exception message，避免 message 夾帶呼叫參數或 password。
 
-所有受保護 client methods 使用相同策略：
+除 one-shot Logout 外，所有可 refresh 的受保護 client methods 使用相同策略：
 
 1. 以目前 access token 呼叫 API。
 2. 只有可解析 JSON 的 HTTP 401 `{ "result": "failed", "msg": "Token expired ,please login again" }` 觸發 access fallback；malformed / non-JSON 401 fail closed 為 `Lihi_Server_Exception`。

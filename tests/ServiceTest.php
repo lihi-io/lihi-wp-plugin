@@ -442,13 +442,68 @@ class ServiceTest extends TestCase
     }
 
     /** @test */
-    public function logout_flushes_the_complete_credential_tuple(): void
+    public function logout_revokes_the_current_session_and_deletes_the_tuple_under_lock(): void
     {
         $client = $this->client();
         $store  = $this->store();
-        $store->shouldReceive('flush')->once();
+        $events = [];
+
+        $store->shouldReceive('acquire_lock')
+            ->once()
+            ->andReturnUsing(function () use (&$events) {
+                $events[] = 'lock';
+                return true;
+            });
+        $store->shouldReceive('get_fresh')
+            ->once()
+            ->andReturnUsing(function () use (&$events) {
+                $events[] = 'read';
+                return $this->credentials();
+            });
+        $client->shouldReceive('logout')
+            ->once()
+            ->with('old-access')
+            ->andReturnUsing(function () use (&$events) {
+                $events[] = 'remote';
+            });
+        $store->shouldReceive('delete')
+            ->once()
+            ->andReturnUsing(function () use (&$events) {
+                $events[] = 'delete';
+            });
+        $store->shouldReceive('release_lock')
+            ->once()
+            ->andReturnUsing(function () use (&$events) {
+                $events[] = 'release';
+            });
 
         $this->service($client, $store)->logout();
+
+        $this->assertSame(
+            ['lock', 'read', 'remote', 'delete', 'release'],
+            $events
+        );
+    }
+
+    /** @test */
+    public function logout_ignores_remote_failure_and_still_deletes_the_local_tuple(): void
+    {
+        $client = $this->client();
+        $store  = $this->store();
+
+        $store->shouldReceive('acquire_lock')->once()->andReturn(true);
+        $store->shouldReceive('get_fresh')
+            ->once()
+            ->andReturn($this->credentials());
+        $client->shouldReceive('logout')
+            ->once()
+            ->with('old-access')
+            ->andThrow(new Lihi_Server_Exception('lihi unavailable'));
+        $store->shouldReceive('delete')->once();
+        $store->shouldReceive('release_lock')->once();
+
+        $this->service($client, $store)->logout();
+
         $this->assertTrue(true);
     }
 

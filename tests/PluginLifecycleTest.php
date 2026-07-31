@@ -76,4 +76,100 @@ class PluginLifecycleTest extends \WP_UnitTestCase
         $this->assertIsString( $epoch );
         $this->assertMatchesRegularExpression( '/^[a-f0-9]{64}$/', $epoch );
     }
+
+    public function test_uninstall_revokes_the_remote_session_before_local_cleanup(): void
+    {
+        update_option( 'lihi_auth_tokens', [
+            'email'         => 'admin@example.com',
+            'uuid'          => '7c7a984b-c772-479c-957b-5a25bb2b9d18',
+            'access_token'  => 'uninstall-access-token',
+            'refresh_token' => 'uninstall-refresh-token',
+        ], false );
+        $request = null;
+        $filter  = static function ( $preempt, array $args, string $url ) use ( &$request ) {
+            $tokens = get_option( 'lihi_auth_tokens' );
+            $request = [
+                'url'             => $url,
+                'args'            => $args,
+                'lifecycle_state' => [
+                    'epoch'        => get_option( 'lihi_auth_epoch' ),
+                    'access_token' => is_array( $tokens )
+                        ? ( $tokens['access_token'] ?? null )
+                        : null,
+                    'lock_owned'   => is_string(
+                        get_option( 'lihi_auth_tokens_lock' )
+                    ),
+                ],
+            ];
+
+            return [
+                'headers'  => [],
+                'body'     => '{"result":true,"msg":""}',
+                'response' => [
+                    'code'    => 200,
+                    'message' => 'OK',
+                ],
+                'cookies'  => [],
+            ];
+        };
+        add_filter( 'pre_http_request', $filter, 10, 3 );
+
+        try {
+            $this->run_uninstall();
+        } finally {
+            remove_filter( 'pre_http_request', $filter, 10 );
+        }
+
+        $this->assertIsArray( $request );
+        $this->assertSame(
+            \Lihi\ShortUrl\lihi_api_host() . '/api/wordpress/v1/auth/logout',
+            $request['url']
+        );
+        $this->assertSame(
+            'Bearer uninstall-access-token',
+            $request['args']['headers']['Authorization']
+        );
+        $this->assertSame( 5, $request['args']['timeout'] );
+        $this->assertSame( [
+            'epoch'        => false,
+            'access_token' => 'uninstall-access-token',
+            'lock_owned'   => true,
+        ], $request['lifecycle_state'] );
+        $this->assertFalse( get_option( 'lihi_auth_tokens' ) );
+        $this->assertFalse( get_option( 'lihi_auth_tokens_lock' ) );
+        $this->assertFalse( get_option( 'lihi_auth_epoch' ) );
+    }
+
+    public function test_uninstall_ignores_remote_logout_failure_and_finishes_cleanup(): void
+    {
+        update_option( 'lihi_auth_tokens', [
+            'email'         => 'admin@example.com',
+            'uuid'          => '7c7a984b-c772-479c-957b-5a25bb2b9d18',
+            'access_token'  => 'uninstall-access-token',
+            'refresh_token' => 'uninstall-refresh-token',
+        ], false );
+        $filter = static function () {
+            return new \WP_Error( 'lihi_unavailable', 'lihi unavailable' );
+        };
+        add_filter( 'pre_http_request', $filter, 10, 3 );
+
+        try {
+            $this->run_uninstall();
+        } finally {
+            remove_filter( 'pre_http_request', $filter, 10 );
+        }
+
+        $this->assertFalse( get_option( 'lihi_auth_tokens' ) );
+        $this->assertFalse( get_option( 'lihi_auth_tokens_lock' ) );
+        $this->assertFalse( get_option( 'lihi_auth_epoch' ) );
+    }
+
+    private function run_uninstall(): void
+    {
+        if ( ! defined( 'WP_UNINSTALL_PLUGIN' ) ) {
+            define( 'WP_UNINSTALL_PLUGIN', true );
+        }
+
+        include dirname( __DIR__ ) . '/lihi-short-url/uninstall.php';
+    }
 }
