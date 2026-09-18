@@ -48,9 +48,34 @@ class PluginHooksTest extends \WP_UnitTestCase
         $this->assertNotFalse(has_action('wp_ajax_lihi_create_url'));
     }
 
-    public function test_wp_ajax_lihi_update_email_handler_is_registered(): void
+    public function test_wp_ajax_lihi_login_handler_is_registered(): void
     {
-        $this->assertNotFalse(has_action('wp_ajax_lihi_update_email'));
+        $this->assertNotFalse(has_action('wp_ajax_lihi_login'));
+    }
+
+    public function test_wp_ajax_lihi_register_handler_is_registered(): void
+    {
+        $this->assertNotFalse(has_action('wp_ajax_lihi_register'));
+    }
+
+    public function test_wp_ajax_lihi_logout_handler_is_registered(): void
+    {
+        $this->assertNotFalse(has_action('wp_ajax_lihi_logout'));
+    }
+
+    public function test_wp_ajax_lihi_group_options_handler_is_registered(): void
+    {
+        $this->assertNotFalse(has_action('wp_ajax_lihi_group_options'));
+    }
+
+    public function test_wp_ajax_lihi_switch_group_handler_is_registered(): void
+    {
+        $this->assertNotFalse(has_action('wp_ajax_lihi_switch_group'));
+    }
+
+    public function test_removed_update_email_ajax_handler_is_not_registered(): void
+    {
+        $this->assertFalse(has_action('wp_ajax_lihi_update_email'));
     }
 
     public function test_wp_ajax_lihi_url_options_handler_is_registered(): void
@@ -213,11 +238,12 @@ class PluginHooksTest extends \WP_UnitTestCase
     // Settings page registration (settings.php)
     // -------------------------------------------------------------------------
 
-    public function test_admin_init_registers_lihi_email_setting(): void
+    public function test_admin_init_does_not_register_a_split_email_setting(): void
     {
         global $wp_registered_settings;
         $this->runAdminInit();
-        $this->assertArrayHasKey('lihi_email', $wp_registered_settings);
+        $registered = is_array($wp_registered_settings) ? $wp_registered_settings : [];
+        $this->assertArrayNotHasKey('lihi_email', $registered);
     }
 
     public function test_admin_menu_registers_settings_page(): void
@@ -227,10 +253,16 @@ class PluginHooksTest extends \WP_UnitTestCase
         $this->assertNotFalse(menu_page_url('lihi-settings', false));
     }
 
-    public function test_email_change_flushes_token_transient(): void
+    public function test_identity_and_tokens_share_one_atomic_option(): void
     {
-        set_transient('lihi_token', 'stale-jwt', HOUR_IN_SECONDS);
-        update_option('lihi_email', 'new@example.com');
-        $this->assertFalse(get_transient('lihi_token'));
+        $credentials = [
+            'email'         => 'new@example.com',
+            'uuid'          => '2df6f4f1-2a75-4d0e-9ce0-7c70e8d7bb9e',
+            'access_token'  => 'header.payload.signature',
+            'refresh_token' => 'refresh.payload.signature',
+        ];
+        update_option('lihi_auth_tokens', $credentials, false);
+
+        $this->assertSame($credentials, get_option('lihi_auth_tokens'));
     }
 }

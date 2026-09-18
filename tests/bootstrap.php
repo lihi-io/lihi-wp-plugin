@@ -26,11 +26,20 @@ require_once $_tests_dir . '/includes/functions.php';
 
 function _manually_load_plugin(): void
 {
-    // Email must be set before plugin load so the conditional UI-hook
-    // registration in add-shorturl-column.php fires; PluginHooksTest depends
-    // on this. AdminNoticeTest re-runs bootstrap.php with the option cleared
-    // to exercise the empty-state branch.
-    update_option( 'lihi_email', 'test@example.com' );
+    update_option(
+        'lihi_auth_epoch',
+        'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        false
+    );
+
+    // A complete authenticated credential bundle must exist before plugin load
+    // so the conditional UI-hook registration in add-shorturl-column.php fires.
+    update_option( 'lihi_auth_tokens', [
+        'email'         => 'test@example.com',
+        'uuid'          => '2df6f4f1-2a75-4d0e-9ce0-7c70e8d7bb9e',
+        'access_token'  => 'header.payload.signature',
+        'refresh_token' => 'refresh.payload.signature',
+    ], false );
     require_once dirname(__DIR__) . '/lihi-short-url/lihi-short-url.php';
 }
 

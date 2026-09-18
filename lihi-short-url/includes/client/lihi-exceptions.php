@@ -14,28 +14,47 @@ class Lihi_Auth_Exception extends Lihi_Exception {}
 /** lihi account password verification failed. */
 class Lihi_Email_Or_Password_Invalid_Exception extends Lihi_Auth_Exception {}
 
+/** The requested lihi account does not exist. */
+class Lihi_Account_Not_Found_Exception extends Lihi_Auth_Exception {}
+
+/** Registration was attempted for an existing lihi account. */
+class Lihi_Account_Already_Exists_Exception extends Lihi_Exception {}
+
+/** lihi account registration is unavailable in the request country. */
+class Lihi_Registration_Country_Unavailable_Exception extends Lihi_Auth_Exception {}
+
 /** lihi user is invalid server-side. */
 class Lihi_User_Invalid_Exception extends Lihi_Auth_Exception {}
+
+/** The short-lived PKCE authorization code is invalid or has expired. */
+class Lihi_Authorization_Code_Invalid_Exception extends Lihi_Auth_Exception {}
+
+/** The persisted refresh token is invalid, expired, or has been rotated. */
+class Lihi_Refresh_Token_Invalid_Exception extends Lihi_Auth_Exception {}
 
 /** HTTP 400 — required fields missing or invalid. */
 class Lihi_Validation_Exception extends Lihi_Exception {}
 
+/** HTTP 400 — the lihi plan must be upgraded or renewed before creating a URL. */
+class Lihi_Need_Upgrade_Exception extends Lihi_Validation_Exception {}
+
 /** HTTP 404 HTML — resource not found. */
 class Lihi_Not_Found_Exception extends Lihi_Exception {}
 
-/** HTTP 429 — per-host rate limit exceeded on the auth endpoint. */
+/** HTTP 429 — the upstream lihi request rate limit was exceeded. */
 class Lihi_Rate_Limit_Exception extends Lihi_Exception {}
 
 /** HTTP 5xx HTML or other unrecoverable server error. */
 class Lihi_Server_Exception extends Lihi_Exception {}
 
+/** Another request currently owns the Login / Refresh authentication lease. */
+class Lihi_Authentication_Busy_Exception extends Lihi_Server_Exception {}
+
 /**
  * Token is missing, expired, or has been revoked server-side.
  *
- * Detected by the fixed HTML title "網站升級中..." or the lihi JWT middleware
- * JSON messages "Token invalid ,please login again",
- * "Token expired ,please login again", and
- * "Something wrong ,please login again".
- * Extends Lihi_Server_Exception so general server-error catch blocks still apply.
+ * The current Wordpress API reports this as HTTP 401. It intentionally does
+ * not extend Lihi_Server_Exception: callers may refresh the access token only
+ * for this condition, never for an upstream outage.
  */
-class Lihi_Token_Invalid_Exception extends Lihi_Server_Exception {}
+class Lihi_Token_Invalid_Exception extends Lihi_Auth_Exception {}

@@ -15,21 +15,33 @@ require_once __DIR__ . '/lihi-singletons.php';
  * Return the configured lihi API / app host.
  */
 function lihi_api_host(): string {
-    return 'https://app.lihi.com';
+    return 'https://app.lihi.io';
 }
 
 /**
  * Return the email address used to authenticate with the lihi API.
  */
 function lihi_email(): string {
-    return (string) get_option( 'lihi_email', '' );
+    try {
+        $credentials = Lihi_Singletons::lihi_token_store()->get();
+    } catch ( \Throwable $e ) {
+        return '';
+    }
+
+    return false === $credentials
+        ? ''
+        : $credentials['email'];
 }
 
 /**
- * Return the site-scoped lihi UUID, creating it when missing.
+ * Return whether WordPress has a complete authenticated lihi session.
  */
-function lihi_uuid(): string {
-    return Lihi_Singletons::lihi_uuid_store()->get();
+function lihi_is_authenticated(): bool {
+    try {
+        return Lihi_Singletons::lihi_token_store()->has_credentials();
+    } catch ( \Throwable $e ) {
+        return false;
+    }
 }
 
 /**

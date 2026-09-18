@@ -19,6 +19,7 @@ class AjaxCopyUrlTest extends TestCase
         Functions\when('check_ajax_referer')->justReturn(true);
         Functions\when('current_user_can')->justReturn(true);
         Functions\when('get_post_type')->justReturn('post');
+        Functions\when('Lihi\\ShortUrl\\lihi_is_authenticated')->justReturn(true);
     }
 
     protected function tearDown(): void
@@ -42,7 +43,10 @@ class AjaxCopyUrlTest extends TestCase
         return Mockery::mock(Lihi_Service::class);
     }
 
-    private function expectJsonError(?string &$message, ?int &$statusCode): void
+    /**
+     * @param mixed $message
+     */
+    private function expectJsonError(&$message, ?int &$statusCode): void
     {
         Functions\expect('wp_send_json_error')
             ->once()
@@ -96,13 +100,13 @@ class AjaxCopyUrlTest extends TestCase
     }
 
     /** @test */
-    public function returns_error_when_email_is_not_configured(): void
+    public function returns_error_when_lihi_is_not_connected(): void
     {
         $_POST['item_id'] = '42';
         $_POST['type']    = 'post';
 
         Functions\when('check_ajax_referer')->justReturn(true);
-        Functions\when('Lihi\\ShortUrl\\lihi_email')->justReturn('');
+        Functions\when('Lihi\\ShortUrl\\lihi_is_authenticated')->justReturn(false);
 
         $errorMsg   = null;
         $statusCode = null;
@@ -110,7 +114,7 @@ class AjaxCopyUrlTest extends TestCase
 
         \Lihi\ShortUrl\ajax_copy_url();
 
-        $this->assertStringContainsString('lihi email is not configured', $errorMsg);
+        $this->assertStringContainsString('lihi is not connected', $errorMsg);
         $this->assertSame(409, $statusCode);
     }
 
@@ -397,125 +401,6 @@ class AjaxCopyUrlTest extends TestCase
     }
 
     /** @test */
-    public function edit_returns_passthrough_nonce_for_existing_short_url(): void
-    {
-        $_POST['item_id'] = '42';
-        $_POST['challenge'] = str_repeat('A', 43);
-
-        $service = $this->mockService();
-        $service->shouldReceive('get_existing_short_url')
-            ->with(42, 'post')
-            ->once()
-            ->andReturn('https://lihi.io/existing');
-        $service->shouldReceive('create_passthrough_nonce')
-            ->with('https://lihi.io/existing', str_repeat('A', 43))
-            ->once()
-            ->andReturn('nonce-token');
-        \Lihi\ShortUrl\Lihi_Singletons::lihi_service_set($service);
-
-        Functions\when('Lihi\ShortUrl\lihi_passthrough_redirect_url')->justReturn('https://app.lihidev.com/api/wordpress/v1/passthrough/redirect');
-        Functions\expect('update_post_meta')
-            ->once()
-            ->with(42, 'lihi_already', '1');
-
-        $sent = null;
-        Functions\expect('wp_send_json_success')
-            ->once()
-            ->andReturnUsing(function ($data) use (&$sent) {
-                $sent = $data;
-            });
-
-        \Lihi\ShortUrl\ajax_edit_url();
-
-        $this->assertSame('nonce-token', $sent['nonce']);
-        $this->assertSame('https://app.lihidev.com/api/wordpress/v1/passthrough/redirect', $sent['redirect_url']);
-        $this->assertArrayNotHasKey('target', $sent);
-    }
-
-    /** @test */
-    public function edit_requires_manage_options(): void
-    {
-        $_POST['item_id'] = '42';
-
-        $service = $this->mockService();
-        $service->shouldNotReceive('get_existing_short_url');
-        $service->shouldNotReceive('create_passthrough_nonce');
-        \Lihi\ShortUrl\Lihi_Singletons::lihi_service_set($service);
-
-        $checkedCaps = [];
-        Functions\when('current_user_can')->alias(function ($capability, $postId = null) use (&$checkedCaps) {
-            $checkedCaps[] = [$capability, $postId];
-            return $capability !== 'manage_options';
-        });
-
-        $errorMsg   = null;
-        $statusCode = null;
-        $this->expectJsonError($errorMsg, $statusCode);
-
-        \Lihi\ShortUrl\ajax_edit_url();
-
-        $this->assertContains(['manage_options', null], $checkedCaps);
-        $this->assertNotContains(['read_post', 42], $checkedCaps);
-        $this->assertStringContainsString('permission', $errorMsg);
-        $this->assertSame(403, $statusCode);
-    }
-
-    /** @test */
-    public function edit_requires_browser_challenge(): void
-    {
-        $_POST['item_id'] = '42';
-
-        $service = $this->mockService();
-        $service->shouldNotReceive('get_existing_short_url');
-        $service->shouldNotReceive('create_passthrough_nonce');
-        \Lihi\ShortUrl\Lihi_Singletons::lihi_service_set($service);
-
-        $errorMsg   = null;
-        $statusCode = null;
-        $this->expectJsonError($errorMsg, $statusCode);
-
-        \Lihi\ShortUrl\ajax_edit_url();
-
-        $this->assertStringContainsString('verify browser session', $errorMsg);
-        $this->assertStringNotContainsString('lihi API rejected', $errorMsg);
-        $this->assertSame(400, $statusCode);
-    }
-
-    /** @test */
-    public function edit_marks_item_unready_when_existing_short_url_is_missing(): void
-    {
-        $_POST['item_id'] = '42';
-        $_POST['challenge'] = str_repeat('A', 43);
-
-        $service = $this->mockService();
-        $service->shouldReceive('get_existing_short_url')
-            ->with(42, 'post')
-            ->once()
-            ->andThrow(new \Lihi\ShortUrl\Lihi_Not_Found_Exception('missing'));
-        $service->shouldNotReceive('create_passthrough_nonce');
-        \Lihi\ShortUrl\Lihi_Singletons::lihi_service_set($service);
-
-        Functions\expect('update_post_meta')
-            ->once()
-            ->with(42, 'lihi_already', '0');
-
-        $captured   = null;
-        $statusCode = null;
-        Functions\expect('wp_send_json_error')
-            ->once()
-            ->andReturnUsing(function ($data, $status = null) use (&$captured, &$statusCode) {
-                $captured   = $data;
-                $statusCode = $status;
-            });
-
-        \Lihi\ShortUrl\ajax_edit_url();
-
-        $this->assertSame('lihi_missing', $captured['code']);
-        $this->assertStringContainsString('removed', $captured['message']);
-        $this->assertSame(410, $statusCode);
-    }
-
-    /** @test */
     public function passthrough_nonce_returns_nonce_for_frontend_selected_target(): void
     {
         $_POST['item_id'] = '42';
@@ -531,7 +416,7 @@ class AjaxCopyUrlTest extends TestCase
         $service->shouldNotReceive('get_or_create_short_url');
         \Lihi\ShortUrl\Lihi_Singletons::lihi_service_set($service);
 
-        Functions\when('Lihi\ShortUrl\lihi_passthrough_redirect_url')->justReturn('https://app.lihidev.com/api/wordpress/v1/passthrough/redirect');
+        Functions\when('Lihi\ShortUrl\lihi_passthrough_redirect_url')->justReturn('https://app.lihi.io/api/wordpress/v1/passthrough/redirect');
 
         $sent = null;
         Functions\expect('wp_send_json_success')
@@ -543,27 +428,27 @@ class AjaxCopyUrlTest extends TestCase
         \Lihi\ShortUrl\ajax_passthrough_nonce();
 
         $this->assertSame('nonce-token', $sent['nonce']);
-        $this->assertSame('https://app.lihidev.com/api/wordpress/v1/passthrough/redirect', $sent['redirect_url']);
+        $this->assertSame('https://app.lihi.io/api/wordpress/v1/passthrough/redirect', $sent['redirect_url']);
         $this->assertArrayNotHasKey('target', $sent);
     }
 
     /** @test */
-    public function passthrough_nonce_accepts_utm_settings_target(): void
+    public function passthrough_nonce_accepts_utm_management_target(): void
     {
         $_POST['item_id'] = '42';
         $_POST['challenge'] = str_repeat('A', 43);
-        $_POST['target'] = '/profile#utm-setting';
+        $_POST['target'] = '/utm';
 
         $service = $this->mockService();
         $service->shouldReceive('create_passthrough_nonce')
-            ->with('/profile#utm-setting', str_repeat('A', 43))
+            ->with('/utm', str_repeat('A', 43))
             ->once()
             ->andReturn('nonce-token');
         $service->shouldNotReceive('get_existing_short_url');
         $service->shouldNotReceive('get_or_create_short_url');
         \Lihi\ShortUrl\Lihi_Singletons::lihi_service_set($service);
 
-        Functions\when('Lihi\ShortUrl\lihi_passthrough_redirect_url')->justReturn('https://app.lihidev.com/api/wordpress/v1/passthrough/redirect');
+        Functions\when('Lihi\ShortUrl\lihi_passthrough_redirect_url')->justReturn('https://app.lihi.io/api/wordpress/v1/passthrough/redirect');
 
         $sent = null;
         Functions\expect('wp_send_json_success')
@@ -575,7 +460,7 @@ class AjaxCopyUrlTest extends TestCase
         \Lihi\ShortUrl\ajax_passthrough_nonce();
 
         $this->assertSame('nonce-token', $sent['nonce']);
-        $this->assertSame('https://app.lihidev.com/api/wordpress/v1/passthrough/redirect', $sent['redirect_url']);
+        $this->assertSame('https://app.lihi.io/api/wordpress/v1/passthrough/redirect', $sent['redirect_url']);
         $this->assertArrayNotHasKey('target', $sent);
     }
 
@@ -715,7 +600,7 @@ class AjaxCopyUrlTest extends TestCase
 
         \Lihi\ShortUrl\ajax_create_url();
 
-        $this->assertStringContainsString('has not been verified', $errorMsg);
+        $this->assertStringContainsString('sign in again', $errorMsg);
         $this->assertSame(403, $statusCode);
     }
 
@@ -759,7 +644,7 @@ class AjaxCopyUrlTest extends TestCase
 
         \Lihi\ShortUrl\ajax_create_url();
 
-        $this->assertStringContainsString('login session has expired', $errorMsg);
+        $this->assertStringContainsString('could not be refreshed', $errorMsg);
         $this->assertSame(401, $statusCode);
     }
 
@@ -805,6 +690,111 @@ class AjaxCopyUrlTest extends TestCase
 
         $this->assertStringContainsString('lihi API rejected the request', $errorMsg);
         $this->assertSame(400, $statusCode);
+    }
+
+    /** @test */
+    public function returns_plugin_owned_need_upgrade_error(): void
+    {
+        $_POST['item_id'] = '42';
+        $_POST['type']    = 'post';
+        $_POST['domain']  = 'go.example.com';
+
+        $service = $this->mockService();
+        $service->shouldReceive('get_or_create_short_url')
+            ->andThrow(new \Lihi\ShortUrl\Lihi_Need_Upgrade_Exception(
+                'need_upgrade'
+            ));
+        \Lihi\ShortUrl\Lihi_Singletons::lihi_service_set($service);
+
+        $errorData  = null;
+        $statusCode = null;
+        $this->expectJsonError($errorData, $statusCode);
+
+        \Lihi\ShortUrl\ajax_create_url();
+
+        $this->assertCount(2, $errorData);
+        $this->assertSame('need_upgrade', $errorData['code']);
+        $this->assertSame(
+            'Please upgrade or renew your lihi plan to create this short URL.',
+            $errorData['message']
+        );
+        $this->assertArrayNotHasKey('type', $errorData);
+        $this->assertSame(400, $statusCode);
+    }
+
+    /** @test */
+    public function site_create_fail_uses_the_validation_error_response(): void
+    {
+        $_POST['item_id'] = '42';
+        $_POST['type']    = 'post';
+        $_POST['domain']  = 'go.example.com';
+
+        $service = $this->mockService();
+        $service->shouldReceive('get_or_create_short_url')
+            ->andThrow(new \Lihi\ShortUrl\Lihi_Validation_Exception(
+                'site_create_fail'
+            ));
+        \Lihi\ShortUrl\Lihi_Singletons::lihi_service_set($service);
+
+        $errorMsg   = null;
+        $statusCode = null;
+        $this->expectJsonError($errorMsg, $statusCode);
+
+        \Lihi\ShortUrl\ajax_create_url();
+
+        $this->assertStringContainsString(
+            'lihi API rejected the request: site_create_fail',
+            $errorMsg
+        );
+        $this->assertSame(400, $statusCode);
+    }
+
+    /** @test */
+    public function returns_rate_limit_status_without_leaking_upstream_details(): void
+    {
+        $_POST['item_id'] = '42';
+        $_POST['domain']  = 'go.example.com';
+
+        $service = $this->mockService();
+        $service->shouldReceive('get_or_create_short_url')
+            ->andThrow(new \Lihi\ShortUrl\Lihi_Rate_Limit_Exception('internal quota detail'));
+        \Lihi\ShortUrl\Lihi_Singletons::lihi_service_set($service);
+
+        $errorMsg   = null;
+        $statusCode = null;
+        $this->expectJsonError($errorMsg, $statusCode);
+
+        \Lihi\ShortUrl\ajax_create_url();
+
+        $this->assertStringContainsString('Too many requests', $errorMsg);
+        $this->assertStringNotContainsString('internal quota detail', $errorMsg);
+        $this->assertSame(429, $statusCode);
+    }
+
+    /** @test */
+    public function returns_conflict_when_the_authentication_lease_is_busy(): void
+    {
+        $_POST['item_id'] = '42';
+        $_POST['type']    = 'post';
+        $_POST['domain']  = 'go.example.com';
+
+        $service = $this->mockService();
+        $service->shouldReceive('get_or_create_short_url')
+            ->andThrow(new \Lihi\ShortUrl\Lihi_Authentication_Busy_Exception('lock held'));
+        \Lihi\ShortUrl\Lihi_Singletons::lihi_service_set($service);
+
+        $errorMsg   = null;
+        $statusCode = null;
+        $this->expectJsonError($errorMsg, $statusCode);
+
+        \Lihi\ShortUrl\ajax_create_url();
+
+        $this->assertStringContainsString(
+            'authentication request is in progress',
+            $errorMsg
+        );
+        $this->assertStringNotContainsString('lock held', $errorMsg);
+        $this->assertSame(409, $statusCode);
     }
 
     /** @test */

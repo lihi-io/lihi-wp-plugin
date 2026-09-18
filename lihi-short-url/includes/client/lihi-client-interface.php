@@ -4,25 +4,15 @@ namespace Lihi\ShortUrl;
 /**
  * lihi Wordpress API client contract.
  *
- * Base URL: injected by the caller, typically lihi_api_host().
- * Mirrors the endpoints wired in lihi-admin's `wordpress/v1` group
- * (`routes/api.php`). Auth now lives under the same API namespace and keeps
- * the `/auth` route prefix.
+ * The login flow uses PKCE:
+ *   1. login() exchanges credentials plus a challenge for a short-lived code.
+ *   2. exchange_authorization_code() exchanges that code plus the verifier for
+ *      a server-issued client UUID, access token, and refresh token.
  *
- * `SiteController::find` returns a single short URL in `data.site`; this
- * contract exposes that route only as `get_short_link()`. `SiteController::update`
- * / `destroy` exist in source but are not routed, and `/posts` / `/site-urls`
- * do not exist in this group — so they are intentionally absent from this
- * interface. `POST /mail` (legacy api_key mail sender) has no plugin use and is
- * omitted here.
- *
- * JWT methods require a bearer token obtained from `login()`. The service
- * layer is responsible for acquiring and refreshing the token. The site UUID
- * used by auth payloads is also injected by the caller.
- *
- * Plugin usage note: this contract exposes the server-to-server passthrough
- * nonce endpoint, while the browser-facing redirect remains outside this
- * client because it creates a SaaS web session.
+ * Protected endpoint methods receive the current access token and a fallback
+ * callback. The callback receives the rejected access token and must return a
+ * replacement access token. Each client method retries its own endpoint at
+ * most once.
  */
 
 if ( ! defined( 'ABSPATH' ) ) {
@@ -36,166 +26,194 @@ interface Lihi_Client_Interface {
     // -------------------------------------------------------------------------
 
     /**
-     * Start or complete email verification for the current tenant.
+     * Exchange account credentials, the current Wordpress hostname, and a
+     * PKCE challenge for an authorization code.
      *
-     * POST /api/wordpress/v1/auth/update-email (AuthController@updateEmail)
+     * POST /api/wordpress/v1/auth/login
      *
-     * @param string $email    Email to verify.
-     * @param string $password lihi account password.
-     * @return array{verified?: bool}
-     *
-     * @throws Lihi_Validation_Exception on HTTP 400.
-     * @throws Lihi_Email_Or_Password_Invalid_Exception when the password is invalid.
-     * @throws Lihi_Auth_Exception on other HTTP 403 auth rejection.
-     * @throws Lihi_User_Invalid_Exception when lihi marks the user invalid.
-     * @throws Lihi_Rate_Limit_Exception on HTTP 429.
-     * @throws Lihi_Server_Exception on HTTP 500 or network error.
+     * @return array{code?: string}
      */
-    public function update_email( string $email, string $password ): array;
+    public function login(
+        string $email,
+        string $password,
+        string $code_challenge
+    ): array;
 
     /**
-     * Exchange a verified email for a fresh bearer token.
+     * Register a new lihi account for the current Wordpress host.
      *
-     * POST /api/wordpress/v1/auth/login (AuthController@login)
-     *
-     * @param string $email Verified tenant email.
-     * @return array{token: string}
-     *
-     * @throws Lihi_Validation_Exception on HTTP 400.
-     * @throws Lihi_Auth_Exception on HTTP 403 email / tenant rejection.
-     * @throws Lihi_User_Invalid_Exception on "User Invalid" / "user_not_found".
-     * @throws Lihi_Server_Exception on HTTP 500, network error, or result:false.
+     * POST /api/wordpress/v1/auth/register
      */
-    public function login( string $email ): array;
-
-    // -------------------------------------------------------------------------
-    // Profile (jwt)
-    // -------------------------------------------------------------------------
+    public function register( string $email, string $password ): void;
 
     /**
-     * Current user's role and plan expiry.
+     * Exchange a PKCE authorization code for persistent credentials.
      *
-     * GET /api/wordpress/v1/user/profile (UserController@profile)
-     *
-     * Tenant is resolved via the bearer token's `sub` claim; no query params.
-     *
-     * @param string $token JWT bearer token.
+     * POST /api/wordpress/v1/auth/token
      *
      * @return array{
-     *   result: bool,
-     *   data: array{
-     *     user_role: ?string,
-     *     end_date:  ?string,
-     *   },
+     *   uuid?: string,
+     *   token?: string,
+     *   refresh_token?: string,
      * }
-     *
-     * @throws Lihi_Auth_Exception | Lihi_User_Invalid_Exception | Lihi_Token_Invalid_Exception | Lihi_Server_Exception
      */
-    public function get_profile( string $token ): array;
+    public function exchange_authorization_code(
+        string $code,
+        string $code_verifier
+    ): array;
 
     /**
-     * Retrieve create-modal options for the authenticated user.
+     * Rotate the access and refresh tokens for a server-issued client UUID.
      *
-     * GET /api/wordpress/v1/user/options (UserController@options)
+     * POST /api/wordpress/v1/auth/token
      *
-     * @param string $token JWT bearer token.
+     * @return array{
+     *   uuid?: string,
+     *   token?: string,
+     *   refresh_token?: string,
+     * }
+     */
+    public function refresh_access_token(
+        string $uuid,
+        string $refresh_token
+    ): array;
+
+    // -------------------------------------------------------------------------
+    // Session termination (bearer token, no fallback)
+    // -------------------------------------------------------------------------
+
+    /**
+     * Revoke the current Wordpress client session.
+     *
+     * This bearer-authenticated request is intentionally attempted only once:
+     * Logout must continue with local cleanup when the remote session is
+     * already invalid or lihi is unavailable.
+     *
+     * POST /api/wordpress/v1/auth/logout
+     */
+    public function logout( string $access_token ): void;
+
+    // -------------------------------------------------------------------------
+    // Protected API
+    // -------------------------------------------------------------------------
+
+    /**
+     * @param callable(string): string $access_fallback
+     *
+     * @return array{
+     *   result: bool,
+     *   data: array{user_role: ?string, group_name: ?string},
+     * }
+     */
+    public function get_profile(
+        string $access_token,
+        callable $access_fallback
+    ): array;
+
+    /**
+     * @param callable(string): string $access_fallback
      *
      * @return array{
      *   result: bool,
      *   data: array{
-     *     domains:     list<array{id: mixed, name: string}>,
+     *     domains: list<array{id: mixed, name: string}>,
      *     utm_sources: list<string>,
      *     utm_mediums: list<string>,
      *   },
      * }
-     *
-     * @throws Lihi_Validation_Exception on HTTP 400.
-     * @throws Lihi_Auth_Exception | Lihi_User_Invalid_Exception | Lihi_Token_Invalid_Exception | Lihi_Server_Exception
      */
-    public function get_options( string $token ): array;
-
-    // -------------------------------------------------------------------------
-    // Passthrough (jwt)
-    // -------------------------------------------------------------------------
+    public function get_options(
+        string $access_token,
+        callable $access_fallback
+    ): array;
 
     /**
-     * Create a short-lived nonce that the browser can send to the SaaS GET
-     * passthrough redirect endpoint.
+     * @param callable(string): string $access_fallback
      *
-     * POST /api/wordpress/v1/passthrough/nonce (PassthroughController@nonce)
+     * @return array{
+     *   result: bool,
+     *   data: array{
+     *     groups: list<array{id: ?int, name: ?string}>,
+     *     group_id: ?int,
+     *   },
+     * }
+     */
+    public function get_group_options(
+        string $access_token,
+        callable $access_fallback
+    ): array;
+
+    /**
+     * @param callable(string): string $access_fallback
      *
-     * @param string $token     JWT bearer token.
-     * @param string $target    Optional admin-relative path or absolute URL search target.
-     * @param string $challenge Browser-generated base64url(SHA-256(verifier)) challenge.
+     * @return array{
+     *   result: bool,
+     *   data: array{group_id: ?int},
+     * }
+     */
+    public function switch_group(
+        string $access_token,
+        ?int $group_id,
+        callable $access_fallback
+    ): array;
+
+    /**
+     * @param callable(string): string $access_fallback
      *
      * @return array{
      *   result: bool,
      *   msg: string,
      *   data: array{nonce: string},
      * }
-     *
-     * @throws Lihi_Validation_Exception on HTTP 400 (invalid target).
-     * @throws Lihi_Rate_Limit_Exception on HTTP 429.
-     * @throws Lihi_Auth_Exception | Lihi_User_Invalid_Exception | Lihi_Token_Invalid_Exception | Lihi_Server_Exception
      */
-    public function create_passthrough_nonce( string $token, string $target, string $challenge ): array;
-
-    // -------------------------------------------------------------------------
-    // Sites (jwt)
-    // -------------------------------------------------------------------------
+    public function create_passthrough_nonce(
+        string $access_token,
+        string $target,
+        string $challenge,
+        callable $access_fallback
+    ): array;
 
     /**
-     * Find the short-link URL for one WordPress type / type ID pair.
-     *
-     * GET /api/wordpress/v1/site/find (SiteController@find)
-     *
-     * @param string     $token   JWT bearer token.
-     * @param string     $type    Resource type (e.g. 'post', 'page', 'attachment').
-     * @param int|string $type_id Single WordPress object ID.
+     * @param int|string               $type_id
+     * @param callable(string): string $access_fallback
      *
      * @return array{
      *   result: bool,
      *   msg?: string,
-     *   data: array{
-     *     site: string,
-     *   },
+     *   data: array{site: string},
      * }
-     *
-     * @throws Lihi_Validation_Exception on HTTP 400 (missing required filters).
-     * @throws Lihi_Auth_Exception | Lihi_User_Invalid_Exception | Lihi_Token_Invalid_Exception | Lihi_Server_Exception
      */
-    public function get_short_link( string $token, string $type, $type_id ): array;
+    public function get_short_link(
+        string $access_token,
+        string $type,
+        $type_id,
+        callable $access_fallback
+    ): array;
 
     /**
-     * Create a new site (short link).
-     *
-     * POST /api/wordpress/v1/site/store (SiteController@store)
-     *
-     * Server-side Validator requires `domain`, `urls`, `type`; `type_id` is
-     * optional but must be a string when present.
-     *
-     * @param string $token JWT bearer token.
      * @param array{
-     *   domain:   string,
-     *   urls:     list<string>,
-     *   type:     string,
+     *   domain: string,
+     *   urls: list<string>,
+     *   type: string,
      *   type_id?: string|int,
-     *   tags?:    string,
-     * } $body Request body.
+     *   tags?: string,
+     * } $body
+     * @param callable(string): string $access_fallback
      *
      * @return array{
      *   result: bool,
      *   data: array{
-     *     id:             int,
-     *     domain_name:    string,
-     *     short_url:      string,
-     *     site_urls:      list<array{id: int, url: string}>,
+     *     id: int,
+     *     domain_name: string,
+     *     short_url: string,
+     *     site_urls: list<array{id: int, url: string}>,
      *     wordpress_link: array{type: string, type_id: string},
      *   },
      * }
-     *
-     * @throws Lihi_Validation_Exception on HTTP 400 (missing required fields).
-     * @throws Lihi_Auth_Exception | Lihi_User_Invalid_Exception | Lihi_Token_Invalid_Exception | Lihi_Server_Exception
      */
-    public function create_site( string $token, array $body ): array;
+    public function create_site(
+        string $access_token,
+        array $body,
+        callable $access_fallback
+    ): array;
 }

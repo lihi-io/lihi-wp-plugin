@@ -22,12 +22,12 @@ function lihi_button_asset_version( string $asset ): string {
     $path     = plugin_dir_path( __FILE__ ) . '../assets/' . ltrim( $asset, '/' );
     $modified = file_exists( $path ) ? filemtime( $path ) : false;
 
-    return $modified ? '1.0.5-' . $modified : '1.0.5';
+    return $modified ? '1.0.7-' . $modified : '1.0.7';
 }
 
-// UI hooks (column, container, enqueue) only register when the auth email is set.
-// AJAX handlers are registered unconditionally in shorturl-column-ajax.php.
-if ( lihi_email() !== '' ) {
+// UI hooks only register when a complete access / refresh credential bundle is
+// present. AJAX handlers remain unconditional so stale pages receive JSON.
+if ( lihi_is_authenticated() ) {
 
 // Enqueue lihi-button.js on list screens, media library, and post edit
 // (so the button works inside the media modal opened from the editor).
@@ -128,7 +128,7 @@ add_action( 'admin_enqueue_scripts', function ( $hook ) {
             'confirmMessage'   => __( 'Go to the lihi dashboard to manage UTM options?', 'lihi-short-url' ),
             'proofUnavailable' => __( 'Your browser does not support secure lihi dashboard login.', 'lihi-short-url' ),
             'invalidProof'     => __( 'Could not verify browser session. Please refresh the page and try again.', 'lihi-short-url' ),
-            'target'           => '/profile#utm-setting',
+            'target'           => '/utm',
         ],
     ] );
 } );
@@ -192,4 +192,4 @@ add_filter( 'attachment_fields_to_edit', function ( $form_fields, $post ) {
     return $form_fields;
 }, 10, 2 );
 
-} // end lihi_email() guard
+} // end lihi_is_authenticated() guard
