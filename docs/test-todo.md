@@ -235,7 +235,7 @@ CI / packaging：目前 release metadata 為 `1.0.6`，plugin header、WordPress
 - [x] Options 回傳 normalized domain `{ value, label }` 與 UTM source / medium
 - [x] Create 要求 non-empty domain，sanitize domain / tags / UTM，成功寫 `lihi_already = 1`
 - [x] Copy 只查既有 URL；missing 時寫 `lihi_already = 0` 並回 HTTP 410 / `lihi_missing`
-- [x] Passthrough 接受 absolute short URL、`/myDomain`、`/profile#utm-setting`，只回 nonce / redirect URL
+- [x] Passthrough 接受 absolute short URL、`/myDomain`、`/utm`，只回 nonce / redirect URL
 - [x] Exception mapping：400 validation、400 `need_upgrade` dedicated error、401 expired session、403 permission / account unavailable、409 disconnected / auth busy、410 missing URL、429 rate limit、503 service unavailable、500 unexpected
 - [x] `POST /site/store` 的 `need_upgrade` 對應獨立 exception、`code: need_upgrade` 與 plugin-owned gettext message；`site_create_fail` 維持一般 validation error
 - [n/a] Copy 只有 `lihi_missing` 才切回 Create 並開 modal；其他錯誤保留狀態（JS review）

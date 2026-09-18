@@ -128,7 +128,7 @@ add_action( 'admin_enqueue_scripts', function ( $hook ) {
             'confirmMessage'   => __( 'Go to the lihi dashboard to manage UTM options?', 'lihi-short-url' ),
             'proofUnavailable' => __( 'Your browser does not support secure lihi dashboard login.', 'lihi-short-url' ),
             'invalidProof'     => __( 'Could not verify browser session. Please refresh the page and try again.', 'lihi-short-url' ),
-            'target'           => '/profile#utm-setting',
+            'target'           => '/utm',
         ],
     ] );
 } );

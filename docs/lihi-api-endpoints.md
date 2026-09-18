@@ -454,7 +454,7 @@ Body:
 ```
 
 - `challenge` 為瀏覽器產生 verifier 後計算的 `base64url(sha256(verifier))`，長度 43，供 redirect GET 時用 verifier 驗證。
-- `target` 可省略或為空字串；也可為 admin-relative path（例如 `/myDomain`、`/profile#utm-setting`）或完整 `http(s)` URL。外掛 Edit button 會先查目前短網址，並把該短網址作為完整 URL `target`；Custom domain 入口會以 `/myDomain` 作為 `target`，UTM 管理入口會以 `/profile#utm-setting` 作為 `target`。
+- `target` 可省略或為空字串；也可為 admin-relative path（例如 `/myDomain`、`/utm`）或完整 `http(s)` URL。外掛 Edit button 會先查目前短網址，並把該短網址作為完整 URL `target`；Custom domain 入口會以 `/myDomain` 作為 `target`，UTM 管理入口會以 `/utm` 作為 `target`。
 - `target` 最大長度 2048；`challenge` 必填。
 
 Response 200:
@@ -496,7 +496,7 @@ Query:
 
 成功：
 - `target` 空 → redirect `/admin`
-- `target` 為 `/myDomain`、`/profile#utm-setting` 等 admin-relative path → redirect `/admin/myDomain`、`/admin/profile#utm-setting`
+- `target` 為 `/myDomain`、`/utm` 等 admin-relative path → redirect `/admin/myDomain`、`/admin/utm`
 - `target` 為完整 URL → redirect `/admin?tag={target}`
 
 此 endpoint 不是 `Lihi_Client` method，因為它的副作用是瀏覽器 web session。
@@ -572,7 +572,7 @@ Body:
 
 建立 modal 透過 `lihi_url_options` / `GET /user/domain-options` 載入 domains、`utm_sources` 與 `utm_mediums`，前端快取 60 秒。Attachment modal 隱藏 UTM controls 並提交空值；後端忽略空白 UTM。有效 UTM 只附加到 destination URL query string，不以獨立 `utm` object 傳給 lihi API。Create 只在 WordPress 端要求 non-empty domain，最終 domain membership 由 lihi API 驗證。
 
-Custom domain 與 UTM option management 會在確認後產生 browser verifier / challenge，呼叫 `lihi_passthrough_nonce`，再以 nonce + verifier 開啟 `/passthrough/redirect`。Targets 分別是 `/myDomain` 與 `/profile#utm-setting`。
+Custom domain 與 UTM option management 會在確認後產生 browser verifier / challenge，呼叫 `lihi_passthrough_nonce`，再以 nonce + verifier 開啟 `/passthrough/redirect`。Targets 分別是 `/myDomain` 與 `/utm`。
 
 Short URL UI 只在完整 `{ email, uuid, access_token, refresh_token }` bundle 存在時註冊。PHP 輸出空的 `data-lihi-container`；前端建立 buttons。現行四個 Short URL / passthrough AJAX actions 是 `lihi_url_options`、`lihi_create_url`、`lihi_copy_url`、`lihi_passthrough_nonce`；設定頁另有 `lihi_group_options` 與 `lihi_switch_group`。
 

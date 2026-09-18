@@ -433,15 +433,15 @@ class AjaxCopyUrlTest extends TestCase
     }
 
     /** @test */
-    public function passthrough_nonce_accepts_utm_settings_target(): void
+    public function passthrough_nonce_accepts_utm_management_target(): void
     {
         $_POST['item_id'] = '42';
         $_POST['challenge'] = str_repeat('A', 43);
-        $_POST['target'] = '/profile#utm-setting';
+        $_POST['target'] = '/utm';
 
         $service = $this->mockService();
         $service->shouldReceive('create_passthrough_nonce')
-            ->with('/profile#utm-setting', str_repeat('A', 43))
+            ->with('/utm', str_repeat('A', 43))
             ->once()
             ->andReturn('nonce-token');
         $service->shouldNotReceive('get_existing_short_url');
