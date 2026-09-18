@@ -40,7 +40,7 @@ class AuthClientTest extends TestCase
 
     private function client(): Lihi_Client
     {
-        return new Lihi_Client('https://app.lihi.com');
+        return new Lihi_Client('https://app.lihi.io');
     }
 
     /**
@@ -95,7 +95,7 @@ class AuthClientTest extends TestCase
         $body    = json_decode($request['args']['body'], true);
 
         $this->assertSame(
-            'https://app.lihi.com/api/wordpress/v1/auth/login',
+            'https://app.lihi.io/api/wordpress/v1/auth/login',
             $request['url']
         );
         $this->assertSame('POST', $request['args']['method']);
@@ -162,7 +162,7 @@ class AuthClientTest extends TestCase
         $body    = json_decode($request['args']['body'], true);
 
         $this->assertSame(
-            'https://app.lihi.com/api/wordpress/v1/auth/register',
+            'https://app.lihi.io/api/wordpress/v1/auth/register',
             $request['url']
         );
         $this->assertSame([
@@ -216,7 +216,7 @@ class AuthClientTest extends TestCase
         $body    = json_decode($request['args']['body'], true);
 
         $this->assertSame(
-            'https://app.lihi.com/api/wordpress/v1/auth/token',
+            'https://app.lihi.io/api/wordpress/v1/auth/token',
             $request['url']
         );
         $this->assertSame([
@@ -293,7 +293,7 @@ class AuthClientTest extends TestCase
         $request = $capture();
 
         $this->assertSame(
-            'https://app.lihi.com/api/wordpress/v1/auth/logout',
+            'https://app.lihi.io/api/wordpress/v1/auth/logout',
             $request['url']
         );
         $this->assertSame('POST', $request['args']['method']);

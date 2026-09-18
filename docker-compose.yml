@@ -16,7 +16,7 @@ services:
       retries: 5
 
   wordpress:
-    image: wordpress:latest
+    image: wordpress:7.1.0-php8.2-apache
     restart: unless-stopped
     ports:
       - "8080:80"
@@ -64,7 +64,7 @@ services:
         PHP_IMAGE: php:7.4-cli-bullseye
     working_dir: /app/code
     environment:
-      COMPOSER_ROOT_VERSION: 1.0.6
+      COMPOSER_ROOT_VERSION: 1.0.7
       LIHI_VENDOR_DIR: /app/vendor
       LIHI_WORDPRESS_DIR: /app/wordpress
       XDEBUG_MODE: "off"
@@ -91,7 +91,7 @@ services:
         PHP_IMAGE: php:8.2-cli-bookworm
     working_dir: /app/code
     environment:
-      COMPOSER_ROOT_VERSION: 1.0.6
+      COMPOSER_ROOT_VERSION: 1.0.7
       LIHI_VENDOR_DIR: /app/vendor
       LIHI_WORDPRESS_DIR: /app/wordpress
       XDEBUG_MODE: "off"

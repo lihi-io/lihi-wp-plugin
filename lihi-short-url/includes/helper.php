@@ -15,7 +15,7 @@ require_once __DIR__ . '/lihi-singletons.php';
  * Return the configured lihi API / app host.
  */
 function lihi_api_host(): string {
-    return 'https://app.lihi.com';
+    return 'https://app.lihi.io';
 }
 
 /**

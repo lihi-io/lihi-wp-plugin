@@ -416,7 +416,7 @@ class AjaxCopyUrlTest extends TestCase
         $service->shouldNotReceive('get_or_create_short_url');
         \Lihi\ShortUrl\Lihi_Singletons::lihi_service_set($service);
 
-        Functions\when('Lihi\ShortUrl\lihi_passthrough_redirect_url')->justReturn('https://app.lihi.com/api/wordpress/v1/passthrough/redirect');
+        Functions\when('Lihi\ShortUrl\lihi_passthrough_redirect_url')->justReturn('https://app.lihi.io/api/wordpress/v1/passthrough/redirect');
 
         $sent = null;
         Functions\expect('wp_send_json_success')
@@ -428,7 +428,7 @@ class AjaxCopyUrlTest extends TestCase
         \Lihi\ShortUrl\ajax_passthrough_nonce();
 
         $this->assertSame('nonce-token', $sent['nonce']);
-        $this->assertSame('https://app.lihi.com/api/wordpress/v1/passthrough/redirect', $sent['redirect_url']);
+        $this->assertSame('https://app.lihi.io/api/wordpress/v1/passthrough/redirect', $sent['redirect_url']);
         $this->assertArrayNotHasKey('target', $sent);
     }
 
@@ -448,7 +448,7 @@ class AjaxCopyUrlTest extends TestCase
         $service->shouldNotReceive('get_or_create_short_url');
         \Lihi\ShortUrl\Lihi_Singletons::lihi_service_set($service);
 
-        Functions\when('Lihi\ShortUrl\lihi_passthrough_redirect_url')->justReturn('https://app.lihi.com/api/wordpress/v1/passthrough/redirect');
+        Functions\when('Lihi\ShortUrl\lihi_passthrough_redirect_url')->justReturn('https://app.lihi.io/api/wordpress/v1/passthrough/redirect');
 
         $sent = null;
         Functions\expect('wp_send_json_success')
@@ -460,7 +460,7 @@ class AjaxCopyUrlTest extends TestCase
         \Lihi\ShortUrl\ajax_passthrough_nonce();
 
         $this->assertSame('nonce-token', $sent['nonce']);
-        $this->assertSame('https://app.lihi.com/api/wordpress/v1/passthrough/redirect', $sent['redirect_url']);
+        $this->assertSame('https://app.lihi.io/api/wordpress/v1/passthrough/redirect', $sent['redirect_url']);
         $this->assertArrayNotHasKey('target', $sent);
     }
 

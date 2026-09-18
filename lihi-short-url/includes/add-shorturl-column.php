@@ -22,7 +22,7 @@ function lihi_button_asset_version( string $asset ): string {
     $path     = plugin_dir_path( __FILE__ ) . '../assets/' . ltrim( $asset, '/' );
     $modified = file_exists( $path ) ? filemtime( $path ) : false;
 
-    return $modified ? '1.0.6-' . $modified : '1.0.6';
+    return $modified ? '1.0.7-' . $modified : '1.0.7';
 }
 
 // UI hooks only register when a complete access / refresh credential bundle is

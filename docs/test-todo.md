@@ -6,9 +6,11 @@ Composer 僅在官方 `php:*-cli` 測試 container 內執行；PHP 7.4 與 PHP 8
 
 `make test` 會先停掉開發用 `wordpress` / `db` services，再用 `db_test` 依序跑 `phpunit74`、`phpunit82`，每個 PHPUnit container 跑完即停止。單版使用 `make test74` / `make test82`；coverage targets 採相同逐版模式。
 
-目前 test suite 為 **240 tests / 635 assertions**，涵蓋 PHP 7.4 與 PHP 8.2。
+目前 test suite 為 **240 tests / 638 assertions**，涵蓋 PHP 7.4 與 PHP 8.2，兩套測試皆使用 WordPress core / `wp-phpunit` **7.1.1**。
 
-CI / packaging：目前 release metadata 為 `1.0.6`，plugin header、WordPress.org Stable tag / changelog / upgrade notice、兩個 test container 的 `COMPOSER_ROOT_VERSION`、asset cache prefix 與翻譯 catalog version 必須一致。`.github/workflows/package-plugin.yml` 只在 tag push 時執行；Package job 打包 `lihi-short-url/` 成 `build/lihi-short-url.zip`，驗證主檔與 `readme.txt`，上傳 artifact `lihi-short-url-plugin`；release job 下載同一 artifact 建立或更新 GitHub Release。
+開發 image 固定為 `wordpress:7.1.0-php8.2-apache`（官方 7.1.1 image tag 尚未提供）。Composer 的 core package repository 改用官方 `wordpress-7.1.1.zip`，避開 upstream GitHub archive 缺少 `wp-includes` 的問題；安裝位置仍為各 test container 的 `/app/wordpress`。
+
+CI / packaging：目前 release metadata 為 `1.0.7`，plugin header、WordPress.org Stable tag / changelog / upgrade notice、兩個 test container 的 `COMPOSER_ROOT_VERSION`、asset cache prefix 與翻譯 catalog version 必須一致。`.github/workflows/package-plugin.yml` 只在 tag push 時執行；Package job 打包 `lihi-short-url/` 成 `build/lihi-short-url.zip`，驗證主檔與 `readme.txt`，上傳 artifact `lihi-short-url-plugin`；release job 下載同一 artifact 建立或更新 GitHub Release。
 
 | Test class | 基底 | 主要範圍 |
 |---|---|---|
@@ -35,7 +37,7 @@ CI / packaging：目前 release metadata 為 `1.0.6`，plugin header、WordPress
 - [x] `lihi_is_authenticated()` 只接受一個完整 `{ email, uuid, access_token, refresh_token }` bundle
 - [x] `lihi_email()` / `lihi_is_authenticated()` 遇到 store read exception 時 fail closed，bootstrap include 不會讓整個 wp-admin fatal
 - [x] `lihi_api_host()` 由 `Lihi_Singletons::lihi_client()` 傳給 client；client constructor 不再接收本機 UUID
-- [x] production app/API host固定為 `https://app.lihi.com`；client、passthrough與password-reset URL測試皆禁止回退到 `app.lihidev.com`
+- [x] production app/API host固定為 `https://app.lihi.io`；client、passthrough與password-reset URL測試皆禁止回退到 `app.lihidev.com`
 - [x] client / service / token store 僅透過 `Lihi_Singletons` 組裝；沒有 global wrappers
 - [x] `lihi_site_host()` 取 `home_url()` host，供 Register payload 與 short-link type namespace 使用
 - [x] `lihi_resolve_url()`：post / page 使用 permalink，attachment 使用 attachment URL，無法解析時拋例外

@@ -2,9 +2,9 @@
 Contributors: lihidev
 Tags: short url, url shortener, lihi, admin, media
 Requires at least: 5.5
-Tested up to: 7.0
+Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 1.0.6
+Stable tag: 1.0.7
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -12,7 +12,7 @@ Adds lihi Short URL controls to create, copy, and edit short URLs for posts, pag
 
 == Description ==
 
-`lihi Short URL` integrates the [lihi](https://lihi.io) short-link service into the WordPress admin. Editors can create short URLs from post and media list screens, choose a redirect domain, add tags, and add UTM parameters for non-media items, then copy the result without leaving WordPress. Existing short URLs become Copy controls, and administrators can open the matching lihi dashboard page to edit the link. This plugin is open source and maintained at [weedgood/lihi-wp-plugin](https://github.com/weedgood/lihi-wp-plugin).
+`lihi Short URL` integrates the [lihi](https://lihi.io) short-link service into the WordPress admin. Editors can create short URLs from post and media list screens, choose a redirect domain, add tags, and add UTM parameters for non-media items, then copy the result without leaving WordPress. Existing short URLs become Copy controls, and administrators can open the matching lihi dashboard page to edit the link. This plugin is open source and maintained at [lihi-io/lihi-wp-plugin](https://github.com/lihi-io/lihi-wp-plugin).
 
 The plugin runs only inside `wp-admin`; it adds no front-end output and enqueues no scripts on public pages.
 
@@ -37,7 +37,7 @@ The plugin runs only inside `wp-admin`; it adds no front-end output and enqueues
 
 This plugin connects to the lihi short URL service to identify the WordPress site, authenticate the site administrator, and create or look up short URLs. Without an internet connection the plugin cannot function.
 
-**Service: lihi WordPress API auth endpoints** (https://app.lihi.com/api/wordpress/v1/auth)
+**Service: lihi WordPress API auth endpoints** (https://app.lihi.io/api/wordpress/v1/auth)
 
 * When data is sent: when an administrator submits Register, Login, or Logout on **Settings → lihi Short URL**; when Login exchanges its short-lived authorization code; when any protected API rejects the access token and the plugin attempts one token refresh; and once during plugin uninstall when a local session is available.
 * What is sent for Register: the entered email and password plus the WordPress site's hostname. The request also carries normal network metadata such as source IP and User-Agent, which lihi uses to check registration availability and record the registration country and device. Account-creation consent is checked locally before the request. A successful registration only sends a verification email; it returns no login credentials and does not connect the plugin.
@@ -46,12 +46,12 @@ This plugin connects to the lihi short URL service to identify the WordPress sit
 * What is sent for Logout or uninstall: the stored access token in the Authorization header. No request body is sent. This one-shot request is not refreshed or retried; network or API failure is ignored so local Logout/uninstall cleanup still finishes.
 * What WordPress stores: one non-autoloaded credential option containing the email, UUID, access token, and raw refresh token. The password, PKCE verifier, challenge, and authorization code are not stored after the request.
 
-**Service: lihi WordPress API protected endpoints** (https://app.lihi.com/api/wordpress/v1)
+**Service: lihi WordPress API protected endpoints** (https://app.lihi.io/api/wordpress/v1)
 
 * When data is sent: when a connected administrator opens the settings page to display account information, opens the work-group switcher, or confirms a work-group change; when the Create modal loads redirect-domain and UTM options; when an administrator opens the lihi dashboard through passthrough; and when a user clicks "Create", "Copy", or "Edit" to generate, look up, copy, or edit a short URL. Media Create modals hide UTM controls and submit blank UTM values.
 * What is sent: the stored access token; when switching work groups, the selected numeric group ID or `null` for the personal work group; the post or attachment URL (`permalink` or attachment file URL, with entered UTM parameters appended); the post type namespace including the WordPress hostname; the post ID; the selected redirect domain; selected tags as a comma-separated string; and, when requesting browser passthrough, a browser-generated PKCE challenge plus an optional target such as a short URL or lihi dashboard path.
 
-**Service: browser-facing lihi pages** (https://lihi.io, https://app.lihi.com, and https://lihidomain.com)
+**Service: browser-facing lihi pages** (https://lihi.io, https://app.lihi.io, and https://lihidomain.com)
 
 * When data is sent: only after a user clicks the lihi dashboard, password-reset, personal-domain, or verification-email link.
 * What is sent: the browser's normal request metadata. Connected dashboard links additionally carry the short-lived passthrough nonce and browser verifier described above; verification links carry the one-time registration token from the email. Public home, password-reset, and public domain-information links receive no account credentials from the plugin.
@@ -106,6 +106,11 @@ Yes — one non-autoloaded `lihi_auth_tokens` option containing `{ email, uuid, 
 
 == Changelog ==
 
+= 1.0.7 =
+* Verifies compatibility with WordPress 7.1.1 on PHP 7.4 and PHP 8.2.
+* Updates the production app/API host used by API requests, dashboard passthrough, and password-reset links to app.lihi.io.
+* Fixes the UTM management shortcut to open the lihi dashboard UTM page through authenticated passthrough.
+
 = 1.0.6 =
 * Adds separate Login and Register forms; Register sends verification only and never logs in.
 * Adds server-side PKCE authorization-code exchange, one atomic email/UUID/access/refresh credential bundle, rotating refresh tokens, and one access fallback retry for every refreshable protected API.
@@ -153,6 +158,9 @@ Yes — one non-autoloaded `lihi_auth_tokens` option containing `{ email, uuid, 
 * Traditional Chinese (`zh_TW`) translation included.
 
 == Upgrade Notice ==
+
+= 1.0.7 =
+Updates the production app/API host to app.lihi.io and fixes the UTM management shortcut destination; no action required.
 
 = 1.0.6 =
 Adds PKCE Login, rotating access / refresh credentials, work-group switching, and stricter API failure handling. Existing saved credentials are not migrated; log in again after updating.

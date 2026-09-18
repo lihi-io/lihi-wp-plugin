@@ -34,7 +34,7 @@ class ClientTest extends TestCase
 
     private function client(): Lihi_Client
     {
-        return new Lihi_Client('https://app.lihi.com');
+        return new Lihi_Client('https://app.lihi.io');
     }
 
     /**

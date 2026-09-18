@@ -121,22 +121,22 @@ class HelperTest extends \WP_UnitTestCase
         $base_url = $ref->getProperty( 'base_url' );
         $base_url->setAccessible( true );
 
-        $this->assertSame( 'https://app.lihi.com', $base_url->getValue( $client ) );
+        $this->assertSame( 'https://app.lihi.io', $base_url->getValue( $client ) );
         $this->assertFalse( $ref->hasProperty( 'uuid' ) );
     }
 
     public function test_browser_facing_urls_use_the_production_app_host(): void
     {
         $this->assertSame(
-            'https://app.lihi.com',
+            'https://app.lihi.io',
             \Lihi\ShortUrl\lihi_api_host()
         );
         $this->assertSame(
-            'https://app.lihi.com/api/wordpress/v1/passthrough/redirect',
+            'https://app.lihi.io/api/wordpress/v1/passthrough/redirect',
             \Lihi\ShortUrl\lihi_passthrough_redirect_url()
         );
         $this->assertSame(
-            'https://app.lihi.com/admin/password/reset',
+            'https://app.lihi.io/admin/password/reset',
             \Lihi\ShortUrl\lihi_password_reset_url()
         );
     }

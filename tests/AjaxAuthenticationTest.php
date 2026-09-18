@@ -39,7 +39,7 @@ class AjaxAuthenticationTest extends TestCase
         Functions\when( 'esc_url_raw' )->alias( function ( $value ) {
             return $value;
         } );
-        Functions\when( 'Lihi\\ShortUrl\\lihi_password_reset_url' )->justReturn( 'https://app.lihi.com/admin/password/reset' );
+        Functions\when( 'Lihi\\ShortUrl\\lihi_password_reset_url' )->justReturn( 'https://app.lihi.io/admin/password/reset' );
     }
 
     protected function tearDown(): void
@@ -210,7 +210,7 @@ class AjaxAuthenticationTest extends TestCase
 
         $this->assertSame( 403, $status );
         $this->assertSame( 'email_or_password_invalid', $payload['code'] );
-        $this->assertSame( 'https://app.lihi.com/admin/password/reset', $payload['password_reset_url'] );
+        $this->assertSame( 'https://app.lihi.io/admin/password/reset', $payload['password_reset_url'] );
     }
 
     /** @test */
@@ -459,7 +459,7 @@ class AjaxAuthenticationTest extends TestCase
         $_POST['challenge'] = str_repeat( 'A', 43 );
         Functions\when( 'Lihi\\ShortUrl\\lihi_is_authenticated' )->justReturn( true );
         Functions\when( 'Lihi\\ShortUrl\\lihi_passthrough_redirect_url' )
-            ->justReturn( 'https://app.lihi.com/api/wordpress/v1/passthrough/redirect' );
+            ->justReturn( 'https://app.lihi.io/api/wordpress/v1/passthrough/redirect' );
 
         $this->mockService()
             ->shouldReceive( 'create_passthrough_nonce' )

@@ -2,9 +2,9 @@
 
 本外掛對接單一 lihi WordPress API。帳號建立與登入是兩條獨立流程：Register 只寄驗證信；已驗證帳號必須再用 Login 完成 server-side PKCE，才能取得 server-issued UUID、access token 與 rotating refresh token。外掛將登入 email 與這三項 credentials 保存在同一個非 autoload option；除 one-shot Logout 外，可 refresh 的受保護 API 都能在 access token 被 HTTP 401 拒絕時 refresh 並重試一次。
 
-`1.0.6` 外掛的 base URL：
+`1.0.7` 外掛的 base URL：
 
-- `https://app.lihi.com/api/wordpress/v1`
+- `https://app.lihi.io/api/wordpress/v1`
 
 Endpoint contract：
 

@@ -13,6 +13,8 @@ A WordPress admin plugin that integrates with the [lihi](https://lihi.io) URL sh
 - **Settings page** — Login and Register live under Settings → lihi Short URL as mutually exclusive tabs with Login selected by default. They are native POST forms with hidden action/nonces and directly sanitized query-backed tab links, so both submission and tab switching work without JavaScript; JavaScript adds instant keyboard tabs, inline AJAX feedback, ARIA-linked field errors, and a two-second success delay before Login/Logout reload. The service heading breaks cleanly between its two sentences. PHP and JavaScript both require six Unicode code points in the raw Register password without applying different whitespace rules. Registration sends a verification email and does not log in. lihi checks the registration request's country before sending mail; an unavailable country is reported with plugin-owned gettext copy. Login connects a verified account and shows its plan tier plus current work group; a modal loads available groups, stays layered above the dashboard workspace, and switches the WordPress client between groups. A successful switch shows its confirmation for two seconds, then reloads the settings page to fetch fresh group-scoped state. Logout best-effort revokes the server-side WordPress client and always removes the local credential tuple. Create / Copy controls appear only while that complete bundle is present.
 - **i18n ready** — full Traditional Chinese (zh_TW) translation included; text domain `lihi-short-url`.
 
+The production app/API host is `https://app.lihi.io`; API requests, dashboard passthrough, and password-reset links derive from this shared host.
+
 ## Requirements
 
 - WordPress 5.5+
@@ -29,7 +31,7 @@ A WordPress admin plugin that integrates with the [lihi](https://lihi.io) URL sh
 docker compose up -d
 ```
 
-WordPress is available at **http://localhost:8080**.
+WordPress is available at **http://localhost:8080**. The development image is pinned to `wordpress:7.1.0-php8.2-apache`; the official 7.1.1 image tag was not yet available when updating the environment.
 
 The plugin directory (`lihi-short-url/`) is bind-mounted into the container at `wp-content/plugins/lihi-short-url`, so changes take effect immediately without rebuilding.
 
@@ -69,9 +71,11 @@ docker compose --profile test exec phpunit82 sh -lc 'cd /app/code && /app/vendor
 docker compose --profile test stop phpunit82 db_test
 ```
 
+Both PHPUnit environments pin WordPress core and `wp-phpunit/wp-phpunit` to **7.1.1**. Composer downloads core from the official WordPress ZIP through a package repository override because the upstream GitHub archive omitted `wp-includes`; core remains installed in the container-only `/app/wordpress` directory.
+
 The PHP 7.4 container covers the plugin's minimum supported PHP version. The PHP 8.2 container catches compatibility issues on a modern runtime.
 
-The current suite contains **240 tests, 635 assertions** across the PHP 7.4 and PHP 8.2 runs.
+The current suite contains **240 tests, 638 assertions** across the PHP 7.4 and PHP 8.2 runs.
 
 `make coverage` follows the same one-version-at-a-time container pattern and writes reports under `/app/coverage` inside each matching container workspace.
 
@@ -85,7 +89,7 @@ make test74
 
 GitHub Actions automatically builds the distributable plugin ZIP via `.github/workflows/package-plugin.yml` only when a tag is pushed.
 
-The current release metadata is **1.0.6**. It is kept in sync across the plugin header, WordPress.org Stable tag / changelog / upgrade notice, test-container Composer root version, asset cache-busting prefixes, and translation catalog. Admin button assets also append `filemtime` so JavaScript and CSS changes do not mix cached files across releases.
+The current release metadata is **1.0.7**. It is kept in sync across the plugin header, WordPress.org Stable tag / changelog / upgrade notice, test-container Composer root version, asset cache-busting prefixes, and translation catalog. Admin button assets also append `filemtime` so JavaScript and CSS changes do not mix cached files across releases.
 
 The tag workflow uploads an artifact named `lihi-short-url-plugin` containing `build/lihi-short-url.zip`, then the release job downloads that same artifact and creates or updates the GitHub Release for the tag. The ZIP keeps the WordPress-required top-level `lihi-short-url/` directory and verifies that `lihi-short-url.php` and `readme.txt` are present before release.
 
